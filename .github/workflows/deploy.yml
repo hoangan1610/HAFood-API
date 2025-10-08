@@ -32,6 +32,6 @@ jobs:
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v2
         with:
-          app-name: HAShopApi                 # đúng tên Web App của bạn
+          app-name: HAShopApi                           # đúng tên Web App trên Azure
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISH_PROFILE }}
           package: ./publish
