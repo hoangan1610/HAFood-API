@@ -3,12 +3,27 @@ using Microsoft.OpenApi.Models;
 using Microsoft.AspNetCore.HttpOverrides;
 using HAShop.Api.Data;
 using HAShop.Api.Services;
+using System.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // ========== DATABASE ==========
-builder.Services.AddDbContext<AppDbContext>(opt =>
-    opt.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
+var conn = builder.Configuration.GetConnectionString("Default");
+if (string.IsNullOrWhiteSpace(conn))
+{
+    // Chưa có DB → chạy tạm InMemory để mở Swagger/route
+    builder.Services.AddDbContext<AppDbContext>(opt =>
+        opt.UseInMemoryDatabase("dev"));
+
+    // Nếu code nào lỡ cần ISqlConnectionFactory, ném lỗi rõ ràng
+    builder.Services.AddTransient<ISqlConnectionFactory>(_ => new NullSqlConnectionFactory());
+}
+else
+{
+    builder.Services.AddDbContext<AppDbContext>(opt =>
+        opt.UseSqlServer(conn, o => o.EnableRetryOnFailure()));
+    builder.Services.AddTransient<ISqlConnectionFactory, SqlConnectionFactory>();
+}
 
 // ========== CONTROLLERS + SWAGGER ==========
 builder.Services.AddControllers();
@@ -25,9 +40,7 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(
                 "http://localhost:3000",
                 "https://hafood.id.vn",
-                // Origin FE thực sự; nếu Cloudflare Tunnel dùng cho FE thì để domain FE, 
-                // không cần thêm domain API của chính bạn
-                "https://hafood-mock-api.onrender.com" // <-- bỏ dấu "/" ở cuối
+                "https://hafood-mock-api.onrender.com" // không có dấu "/" cuối
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
@@ -36,12 +49,11 @@ builder.Services.AddCors(options =>
 });
 
 // ========== DI ==========
-builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 
 var app = builder.Build();
 
-// (Tuỳ chọn nhưng nên bật) nhận biết HTTPS/host từ reverse proxy của App Service
+// (Tuỳ chọn) nhận biết HTTPS/host từ reverse proxy của App Service
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedHost | ForwardedHeaders.XForwardedProto
@@ -66,8 +78,17 @@ app.MapControllers();
 // Redirect root "/" → "/swagger"
 app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
-// ❌ KHÔNG cần tự bind cổng khi chạy trên App Service (Code deploy)
-// var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
-// app.Urls.Add($"http://*:{port}");
+// (Dev) Health check nhanh
+app.MapGet("/healthz", () => Results.Ok(new
+{
+    db = string.IsNullOrWhiteSpace(conn) ? "InMemory" : "SqlServer",
+    ok = true
+}));
 
 app.Run();
+
+public class NullSqlConnectionFactory : ISqlConnectionFactory
+{
+    public IDbConnection Create() =>
+        throw new InvalidOperationException("Database is not configured. Set ConnectionStrings:Default to enable SQL Server.");
+}
