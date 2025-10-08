@@ -1,0 +1,37 @@
+name: Build and deploy .NET to Azure Web App HAShopApi
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore HAShop.Api.csproj
+
+      - name: Build (Release)
+        run: dotnet build HAShop.Api.csproj -c Release --no-restore
+
+      - name: Publish
+        run: dotnet publish HAShop.Api.csproj -c Release -o ./publish --no-build
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: HAShopApi                 # đúng tên Web App của bạn
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISH_PROFILE }}
+          package: ./publish
