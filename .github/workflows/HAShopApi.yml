@@ -7,20 +7,14 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    env:
-      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
-      DOTNET_CLI_TELEMETRY_OPTOUT: true
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
 
-      # Nếu file csproj không ở root, sửa đường dẫn bên dưới cho đúng:
+      # Nếu csproj KHÔNG ở root, sửa đường dẫn bên dưới cho đúng!
       - name: Restore
         run: dotnet restore HAShop.Api.csproj
 
@@ -30,9 +24,19 @@ jobs:
       - name: Publish
         run: dotnet publish HAShop.Api.csproj -c Release -o ./publish --no-build
 
+      # Kiểm tra có file .dll, .json… không
+      - name: Show publish folder
+        run: ls -al ./publish && echo "====" && ls -al ./publish/* || true
+
+      - name: Zip published app
+        run: |
+          cd publish
+          zip -r ../app.zip .
+          cd ..
+
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v2
         with:
-          app-name: "HAShopApi"                        # Tên Web App chính xác
+          app-name: "HAShopApi"
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISH_PROFILE }}
-          package: "./publish"
+          package: "app.zip"
