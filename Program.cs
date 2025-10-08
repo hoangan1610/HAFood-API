@@ -85,6 +85,8 @@ app.MapGet("/healthz", () => Results.Ok(new
     ok = true
 }));
 
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+app.Urls.Add($"http://0.0.0.0:{port}");
 app.Run();
 
 public class NullSqlConnectionFactory : ISqlConnectionFactory
