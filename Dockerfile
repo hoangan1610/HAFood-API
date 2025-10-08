@@ -1,22 +1,29 @@
-# ===== Build stage =====
+# ==============================
+# Build stage
+# ==============================
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-# Copy project files and restore
-COPY . .
-RUN dotnet restore ./HAShop.Api/HAShop.Api.csproj
+# Copy everything
+COPY . ./
+
+# Restore dependencies
+RUN dotnet restore "HAShop.Api.csproj"
 
 # Build and publish
-RUN dotnet publish ./HAShop.Api/HAShop.Api.csproj -c Release -o /app/out
+RUN dotnet publish "HAShop.Api.csproj" -c Release -o /app/publish
 
-# ===== Runtime stage =====
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+# ==============================
+# Runtime stage
+# ==============================
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 
-COPY --from=build /app/out ./
+# Copy published output
+COPY --from=build /app/publish .
 
-# Expose port for Render
-ENV ASPNETCORE_URLS=http://+:8080
+# Expose port 8080 (Render requirement)
 EXPOSE 8080
 
+# Start app
 ENTRYPOINT ["dotnet", "HAShop.Api.dll"]
