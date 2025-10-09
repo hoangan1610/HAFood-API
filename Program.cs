@@ -4,8 +4,17 @@ using Microsoft.AspNetCore.HttpOverrides;
 using HAShop.Api.Data;
 using HAShop.Api.Services;
 using System.Data;
+using Microsoft.Extensions.Options;
+
 
 var builder = WebApplication.CreateBuilder(args);
+
+
+builder.Services.Configure<SendGridOptions>(builder.Configuration.GetSection("SendGrid"));
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IEmailQueueRepository, EmailQueueRepository>();
+builder.Services.AddSingleton<ISendGridSender, SendGridSender>();
+builder.Services.AddHostedService<EmailQueueWorker>();
 
 // ========== DATABASE ==========
 var conn = builder.Configuration.GetConnectionString("Default");
@@ -23,6 +32,7 @@ else
     builder.Services.AddDbContext<AppDbContext>(opt =>
         opt.UseSqlServer(conn, o => o.EnableRetryOnFailure()));
     builder.Services.AddTransient<ISqlConnectionFactory, SqlConnectionFactory>();
+
 }
 
 // ========== CONTROLLERS + SWAGGER ==========
@@ -75,6 +85,41 @@ app.UseCors("PublicCors");
 app.UseAuthorization();
 app.MapControllers();
 
+app.MapGet("/test-email-verbose", async (ISendGridSender mailer, IOptions<SendGridOptions> opt, HttpRequest req, CancellationToken ct) =>
+{
+    // cho phép đổi người nhận bằng query ?to=
+    var to = req.Query["to"].FirstOrDefault() ?? "your-test-email@example.com";
+
+    try
+    {
+        await mailer.SendTemplateAsync(
+            to,
+            opt.Value.TemplateId,
+            new { NAME = "Test User", OTP = "123456", TTL_MIN = 10, Sender_Name = "HAFood" },
+            ct
+        );
+        return Results.Ok(new { ok = true, note = "SendGrid accepted (202). Check inbox." });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { ok = false, error = ex.Message });
+    }
+});
+
+// 👇 THÊM ROUTE TEST GỬI EMAIL Ở ĐÂY
+app.MapGet("/test-email", async (ISendGridSender mailer) =>
+{
+    var ok = await mailer.SendTemplateEmailAsync(
+        "ngohoangan0@gmail.com", // người nhận test
+        "Anh Hoàng",                   // NAME
+        "123456",                      // OTP
+        10                             // TTL_MIN
+    );
+    return ok ? Results.Ok("✅ Email đã gửi thành công!")
+              : Results.BadRequest("❌ Gửi email thất bại!");
+}).WithDescription("Gửi email test qua SendGrid (Dynamic Template)");
+
+
 // Redirect root "/" → "/swagger"
 app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
@@ -94,3 +139,4 @@ public class NullSqlConnectionFactory : ISqlConnectionFactory
     public IDbConnection Create() =>
         throw new InvalidOperationException("Database is not configured. Set ConnectionStrings:Default to enable SQL Server.");
 }
+
