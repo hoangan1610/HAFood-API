@@ -361,3 +361,10 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# === Custom ignore for sensitive data ===
+# Do not commit environment variable files or secrets
+.env
+.env.*
+appsettings.Development.json
+appsettings.Local.json

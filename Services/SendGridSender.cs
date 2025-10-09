@@ -14,15 +14,21 @@ namespace HAShop.Api.Services
         {
             _http = f.CreateClient(nameof(SendGridSender));
             _opt = opt.Value;
+
+            if (string.IsNullOrWhiteSpace(_opt.ApiKey))
+            {
+                throw new InvalidOperationException("⚠️ SendGrid API key is missing. Please set SENDGRID_API_KEY in your environment variables or .env file.");
+            }
+
             _http.DefaultRequestHeaders.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _opt.ApiKey);
         }
 
-        // ✅ Implement ĐÚNG chữ ký interface
+        // ✅ Implement interface
         public Task SendTemplateAsync(string to, string templateId, object variables, CancellationToken ct = default)
             => SendTemplateCoreAsync(to, templateId, variables, ct, subjectOverride: null);
 
-        // 🔧 Core có thêm subjectOverride (private)
+        // 🔧 Core có thêm subjectOverride
         private async Task SendTemplateCoreAsync(
             string to,
             string templateId,
@@ -31,25 +37,12 @@ namespace HAShop.Api.Services
             string? subjectOverride)
         {
             // ⚙️ Tạo personalization object
-            object personalization;
-            if (string.IsNullOrEmpty(subjectOverride))
+            var personalization = new
             {
-                personalization = new
-                {
-                    to = new[] { new { email = to } },
-                    dynamic_template_data = variables
-                };
-            }
-            else
-            {
-                personalization = new
-                {
-                    to = new[] { new { email = to } },
-                    dynamic_template_data = variables,
-                    subject = subjectOverride
-                };
-            }
-
+                to = new[] { new { email = to } },
+                dynamic_template_data = variables,
+                subject = subjectOverride // null thì JSON bỏ qua
+            };
 
             var payload = new
             {
@@ -77,7 +70,9 @@ namespace HAShop.Api.Services
             if (!resp.IsSuccessStatusCode)
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
-                throw new InvalidOperationException($"SendGrid error {(int)resp.StatusCode}: {body}");
+                throw new InvalidOperationException(
+                    $"❌ SendGrid error {(int)resp.StatusCode}: {body}"
+                );
             }
         }
 
@@ -90,9 +85,6 @@ namespace HAShop.Api.Services
         {
             try
             {
-                // Nếu muốn override subject, gọi core:
-                // await SendTemplateCoreAsync(to, _opt.TemplateId, new { NAME = name, OTP = otp, TTL_MIN = ttlMin, Sender_Name = "HAFood" }, ct, "HAFood: Mã OTP của bạn");
-
                 await SendTemplateAsync(
                     to,
                     _opt.TemplateId,
@@ -101,8 +93,9 @@ namespace HAShop.Api.Services
                 );
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine($"[SendGridSender] ❌ Error: {ex.Message}");
                 return false;
             }
         }
