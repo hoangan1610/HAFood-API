@@ -20,12 +20,12 @@ Env.Load();
 builder.Services.Configure<SendGridOptions>(opt =>
 {
     // 🔒 API key đọc từ environment (hoặc file .env)
-    opt.ApiKey = Environment.GetEnvironmentVariable("SENDGRID_API_KEY");
+    opt.ApiKey = Environment.GetEnvironmentVariable("SENDGRID_API_KEY") ?? "";
 
     // Các thông tin khác lấy từ appsettings.json
-    opt.FromEmail = builder.Configuration["SendGrid:FromEmail"];
-    opt.FromName = builder.Configuration["SendGrid:FromName"];
-    opt.TemplateId = builder.Configuration["SendGrid:TemplateId"];
+    opt.FromEmail = builder.Configuration["SendGrid:FromEmail"] ?? "";
+    opt.FromName = builder.Configuration["SendGrid:FromName"] ?? "";
+    opt.TemplateId = builder.Configuration["SendGrid:TemplateId"] ?? "";
 
     // Nếu có thêm cấu hình phụ:
     if (int.TryParse(builder.Configuration["SendGrid:BatchSize"], out var batch))
@@ -67,6 +67,31 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "HAShop API", Version = "v1" });
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT", // hoặc "GUID" nếu bạn chỉ dùng token GUID
+        In = ParameterLocation.Header,
+        Description = "Nhập token theo định dạng: Bearer {token}"
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
 });
 
 builder.Services.AddCors(options =>
@@ -82,8 +107,12 @@ builder.Services.AddCors(options =>
             .AllowCredentials()
     );
 });
+//====================================================
+
 
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IDeviceService, DeviceService>();
+
 
 var app = builder.Build();
 
