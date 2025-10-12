@@ -7,36 +7,38 @@ using System.Data;
 using Microsoft.Extensions.Options;
 using DotNetEnv;
 
+// NEW
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.Mvc;
+using System.Text;
+using HAShop.Api.Options; // <-- JwtOptions
+
 var builder = WebApplication.CreateBuilder(args);
 
 // =========================================================
-// ✅ 1️⃣ Load biến môi trường (.env) – dùng khi dev local
+// 1) Env (.env)
 // =========================================================
 Env.Load();
 
 // =========================================================
-// ✅ 2️⃣ Cấu hình SendGrid (API key lấy từ biến môi trường)
+// 2) SendGrid
 // =========================================================
 builder.Services.Configure<SendGridOptions>(opt =>
 {
-    // 🔒 API key đọc từ environment (hoặc file .env)
     opt.ApiKey = Environment.GetEnvironmentVariable("SENDGRID_API_KEY") ?? "";
-
-    // Các thông tin khác lấy từ appsettings.json
     opt.FromEmail = builder.Configuration["SendGrid:FromEmail"] ?? "";
     opt.FromName = builder.Configuration["SendGrid:FromName"] ?? "";
     opt.TemplateId = builder.Configuration["SendGrid:TemplateId"] ?? "";
 
-    // Nếu có thêm cấu hình phụ:
     if (int.TryParse(builder.Configuration["SendGrid:BatchSize"], out var batch))
         opt.BatchSize = batch;
-
     if (int.TryParse(builder.Configuration["SendGrid:PollIntervalSeconds"], out var poll))
         opt.PollIntervalSeconds = poll;
 });
 
 // =========================================================
-// ✅ 3️⃣ Đăng ký service SendGrid + Email Queue
+// 3) SendGrid services
 // =========================================================
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<IEmailQueueRepository, EmailQueueRepository>();
@@ -44,7 +46,7 @@ builder.Services.AddSingleton<ISendGridSender, SendGridSender>();
 builder.Services.AddHostedService<EmailQueueWorker>();
 
 // =========================================================
-// ✅ 4️⃣ Cấu hình DATABASE
+// 4) DATABASE
 // =========================================================
 var conn = builder.Configuration.GetConnectionString("Default");
 if (string.IsNullOrWhiteSpace(conn))
@@ -60,40 +62,59 @@ else
 }
 
 // =========================================================
-// ✅ 5️⃣ Controller + Swagger + CORS + DI
+// 5) Controllers + Swagger + CORS + DI + ProblemDetails + Auth
 // =========================================================
 builder.Services.AddControllers();
+
+// ProblemDetails + ModelState
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = ctx =>
+    {
+        // thêm traceId cho mọi lỗi
+        ctx.ProblemDetails.Extensions["traceId"] = ctx.HttpContext.TraceIdentifier;
+    };
+});
+builder.Services.Configure<ApiBehaviorOptions>(opt =>
+{
+    opt.InvalidModelStateResponseFactory = context =>
+    {
+        var problem = new ValidationProblemDetails(context.ModelState)
+        {
+            Status = StatusCodes.Status400BadRequest,
+            Title = "VALIDATION_FAILED",
+            Detail = "Dữ liệu gửi lên không hợp lệ.",
+            Instance = context.HttpContext.Request.Path
+        };
+        problem.Extensions["traceId"] = context.HttpContext.TraceIdentifier;
+        return new BadRequestObjectResult(problem);
+    };
+});
+
+// Swagger (có Bearer)
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
     c.SwaggerDoc("v1", new OpenApiInfo { Title = "HAShop API", Version = "v1" });
-
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
         Name = "Authorization",
         Type = SecuritySchemeType.Http,
         Scheme = "bearer",
-        BearerFormat = "JWT", // hoặc "GUID" nếu bạn chỉ dùng token GUID
+        BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "Nhập token theo định dạng: Bearer {token}"
+        Description = "Nhập token: Bearer {token}"
     });
-
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
-            new OpenApiSecurityScheme
-            {
-                Reference = new OpenApiReference
-                {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
-                }
-            },
+            new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" } },
             Array.Empty<string>()
         }
     });
 });
 
+// CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("PublicCors", policy =>
@@ -107,18 +128,103 @@ builder.Services.AddCors(options =>
             .AllowCredentials()
     );
 });
-//====================================================
 
-
+// DI
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IDeviceService, DeviceService>();
+builder.Services.AddScoped<IUserService, UserService>();
 
+// ===== JWT Options (bind từ appsettings.json:Jwt) =====
+builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
+var jwtSection = builder.Configuration.GetSection("Jwt");
+var jwtIssuer = jwtSection.GetValue<string>("Issuer") ?? "";
+var jwtAudience = jwtSection.GetValue<string>("Audience") ?? "";
+var jwtKey = jwtSection.GetValue<string>("Key") ?? "";
+
+// Authentication + Authorization (JWT)
+builder.Services
+    .AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(options =>
+    {
+        options.RequireHttpsMetadata = true;
+        options.SaveToken = true;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = jwtIssuer,
+            ValidAudience = jwtAudience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(string.IsNullOrWhiteSpace(jwtKey) ? "change-this-dev-key" : jwtKey)),
+            ClockSkew = TimeSpan.FromSeconds(30)
+        };
+
+        // 401/403 thân thiện
+        options.Events = new JwtBearerEvents
+        {
+            OnChallenge = async ctx =>
+            {
+                ctx.HandleResponse();
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                ctx.Response.ContentType = "application/problem+json; charset=utf-8";
+                var json = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    type = "about:blank",
+                    title = "UNAUTHENTICATED",
+                    status = 401,
+                    detail = "Thiếu hoặc token không hợp lệ.",
+                    traceId = ctx.HttpContext.TraceIdentifier
+                });
+                await ctx.Response.WriteAsync(json);
+            },
+            OnForbidden = async ctx =>
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                ctx.Response.ContentType = "application/problem+json; charset=utf-8";
+                var json = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    type = "about:blank",
+                    title = "FORBIDDEN",
+                    status = 403,
+                    detail = "Bạn không có quyền truy cập tài nguyên này.",
+                    traceId = ctx.HttpContext.TraceIdentifier
+                });
+                await ctx.Response.WriteAsync(json);
+            }
+        };
+    });
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
 // =========================================================
-// ✅ 6️⃣ Middleware pipeline
+// 6) Middleware pipeline
 // =========================================================
+
+// Exception handler -> ProblemDetails 500
+app.UseExceptionHandler(errApp =>
+{
+    errApp.Run(async context =>
+    {
+        context.Response.ContentType = "application/problem+json";
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            type = "about:blank",
+            title = "INTERNAL_SERVER_ERROR",
+            status = 500,
+            detail = "Đã có lỗi không mong muốn.",
+            traceId = context.TraceIdentifier
+        });
+        await context.Response.WriteAsync(json);
+    });
+});
+
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedHost | ForwardedHeaders.XForwardedProto
@@ -133,12 +239,18 @@ app.UseSwaggerUI(c =>
     c.RoutePrefix = "swagger";
 });
 
+app.UseStaticFiles();
+
 app.UseCors("PublicCors");
+
+// >>> Quan trọng: Authentication trước Authorization
+app.UseAuthentication();
 app.UseAuthorization();
+
 app.MapControllers();
 
 // =========================================================
-// ✅ 7️⃣ Route test SendGrid
+// 7) Routes test SendGrid
 // =========================================================
 app.MapGet("/test-email", async (ISendGridSender mailer) =>
 {
@@ -183,14 +295,14 @@ app.MapGet("/healthz", () => Results.Ok(new
 }));
 
 // =========================================================
-// ✅ 8️⃣ Chạy app
+// 8) Run
 // =========================================================
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 app.Urls.Add($"http://0.0.0.0:{port}");
 app.Run();
 
 // =========================================================
-// ✅ 9️⃣ Class phụ trợ
+// 9) Helpers
 // =========================================================
 public class NullSqlConnectionFactory : ISqlConnectionFactory
 {
