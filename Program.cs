@@ -134,6 +134,13 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IDeviceService, DeviceService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IProductService, ProductService>();
+builder.Services.AddScoped<ICartService, CartService>();
+builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddScoped<IPromotionService, PromotionService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
+builder.Services.AddScoped<ITrackingService, TrackingService>();
+
+
 
 // ===== JWT Options (bind từ appsettings.json:Jwt) =====
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
