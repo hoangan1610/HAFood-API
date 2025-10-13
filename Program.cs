@@ -133,6 +133,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IDeviceService, DeviceService>();
 builder.Services.AddScoped<IUserService, UserService>();
+builder.Services.AddScoped<IProductService, ProductService>();
 
 // ===== JWT Options (bind từ appsettings.json:Jwt) =====
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));

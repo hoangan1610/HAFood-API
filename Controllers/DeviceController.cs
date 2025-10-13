@@ -12,7 +12,7 @@ public class DeviceController(IDeviceService deviceService) : ControllerBase
     public async Task<ActionResult<DeviceUpsertResponse>> UpsertDevice(
         [FromBody] DeviceUpsertRequest req, CancellationToken ct)
     {
-        // Lấy IP nếu client không truyền
+       
         var ip = req.Ip;
         if (string.IsNullOrWhiteSpace(ip))
             ip = GetClientIp(HttpContext.Request);

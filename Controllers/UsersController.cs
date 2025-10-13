@@ -20,10 +20,7 @@ public class UsersController : ControllerBase
         _users = users;
     }
 
-    /// <summary>
-    /// Cập nhật hồ sơ người dùng hiện tại (ID lấy từ token).
-    /// Trường nào không gửi hoặc rỗng sẽ không đổi.
-    /// </summary>
+
     [HttpPut("me/profile")]
     [Consumes("application/json")]
     [Produces("application/json")]
@@ -69,7 +66,7 @@ public class UsersController : ControllerBase
             };
         }
 
-        // Thành công vẫn trả message thân thiện từ service
+        
         return Ok(res);
     }
 
