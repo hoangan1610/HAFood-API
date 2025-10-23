@@ -112,6 +112,8 @@ builder.Services.AddSwaggerGen(c =>
             Array.Empty<string>()
         }
     });
+
+    c.SupportNonNullableReferenceTypes();
 });
 
 // CORS

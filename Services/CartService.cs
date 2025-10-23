@@ -54,8 +54,7 @@ public class CartService(ISqlConnectionFactory db) : ICartService
     }
 
     public async Task AddOrIncrementAsync(long cartId, long variantId, int quantity,
-                                          string? nameVariant, decimal? priceVariant, string? imageVariant,
-                                          CancellationToken ct)
+     string? nameVariant, decimal? priceVariant, string? imageVariant, CancellationToken ct)
     {
         using var con = db.Create();
         var p = new DynamicParameters();
@@ -68,14 +67,21 @@ public class CartService(ISqlConnectionFactory db) : ICartService
 
         try
         {
-            await con.ExecuteAsync(new CommandDefinition("dbo.usp_cart_add_or_increment", p, commandType: CommandType.StoredProcedure, cancellationToken: ct));
+            await con.ExecuteAsync(new CommandDefinition(
+                "dbo.usp_cart_add_or_increment", p,
+                commandType: CommandType.StoredProcedure, cancellationToken: ct));
         }
         catch (SqlException ex) when (ex.Number is 50111)
         {
             throw new InvalidOperationException("INVALID_QUANTITY");
         }
-        // các lỗi khác -> để middleware 500
+        catch (SqlException ex) when (ex.Number is 50110)
+        {
+            // Biến thể không tồn tại
+            throw new KeyNotFoundException("VARIANT_NOT_FOUND");
+        }
     }
+
 
     public async Task UpdateQuantityAsync(long cartId, long variantId, int quantity, CancellationToken ct)
     {

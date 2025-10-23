@@ -3,6 +3,8 @@ using HAShop.Api.Data;
 using HAShop.Api.DTOs;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using System.Linq;
+using System.Text.Json;
 
 namespace HAShop.Api.Services;
 
@@ -31,6 +33,28 @@ public class OrderService(ISqlConnectionFactory db) : IOrderService
         p.Add("@ip", string.IsNullOrWhiteSpace(req.Ip) ? "" : req.Ip);
         p.Add("@note", req.Note);
         p.Add("@address_id", req.Address_Id);
+
+        // 🔹 NEW: truyền mã khuyến mãi nếu có
+        p.Add("@promo_code", req.Promo_Code);
+
+        // 🔹 NEW: selected_line_ids_json
+        if (req.Selected_Line_Ids is { Length: > 0 })
+        {
+            // mảng số => không bị ảnh hưởng bởi naming policy
+            var jsonSel = JsonSerializer.Serialize(req.Selected_Line_Ids);
+            p.Add("@selected_line_ids_json", jsonSel);
+        }
+
+        // 🔹 NEW: items_json (chú ý giữ đúng tên trường Variant_Id/Quantity cho OPENJSON)
+        if (req.Items is { Count: > 0 })
+        {
+            var jsonItems = JsonSerializer.Serialize(
+                req.Items.Select(i => new { Variant_Id = i.Variant_Id, Quantity = i.Quantity }),
+                new JsonSerializerOptions { PropertyNamingPolicy = null }  // giữ nguyên PascalCase
+            );
+            p.Add("@items_json", jsonItems);
+        }
+
         p.Add("@order_id", dbType: DbType.Int64, direction: ParameterDirection.Output);
 
         try
@@ -44,8 +68,6 @@ public class OrderService(ISqlConnectionFactory db) : IOrderService
         catch (SqlException ex) when (ex.Number == 50203) { throw new InvalidOperationException("OUT_OF_STOCK"); }
 
         var orderId = p.Get<long>("@order_id");
-
-        // Tránh null: coalesce về "" để khớp ctor
         var code = await con.ExecuteScalarAsync<string>(new CommandDefinition(
             "SELECT order_code FROM dbo.tbl_orders WHERE id=@id",
             new { id = orderId }, cancellationToken: ct)) ?? "";

@@ -10,9 +10,8 @@ public class DeviceController(IDeviceService deviceService) : ControllerBase
 {
     [HttpPost("upsert")]
     public async Task<ActionResult<DeviceUpsertResponse>> UpsertDevice(
-        [FromBody] DeviceUpsertRequest req, CancellationToken ct)
+    [FromBody] DeviceUpsertRequest req, CancellationToken ct)
     {
-       
         var ip = req.Ip;
         if (string.IsNullOrWhiteSpace(ip))
             ip = GetClientIp(HttpContext.Request);
@@ -20,7 +19,8 @@ public class DeviceController(IDeviceService deviceService) : ControllerBase
         if (ip is null)
             return BadRequest(new { code = "MISSING_IP", message = "Không xác định được IP client." });
 
-        var res = await deviceService.UpsertDeviceAsync(req with { Ip = ip }, ct);
+        // ✅ Thêm null cho ipFromContext (tham số thứ 2)
+        var res = await deviceService.UpsertDeviceAsync(req with { Ip = ip }, null, ct);
 
         if (res.Success) return Ok(res);
 
@@ -30,7 +30,6 @@ public class DeviceController(IDeviceService deviceService) : ControllerBase
             _ => BadRequest(res)
         };
     }
-
     private static string? GetClientIp(HttpRequest request)
     {
         var xff = request.Headers["X-Forwarded-For"].FirstOrDefault();

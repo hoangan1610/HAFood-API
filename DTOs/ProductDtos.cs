@@ -50,7 +50,20 @@ public record VariantWithProductDto(
     int Stock, byte Status, DateTime Created_At, DateTime Updated_At
 );
 
-public record CategoryTreeDto(long Id, long? Parent_Id, string Name, string Path, int Level);
+public record CategoryTreeDto(
+    long Id,
+    long? Parent_Id,
+    string Name,
+    string Path,
+    int Level,
+    string? Image_Url,
+    string? Tag,
+    string? Category_Code,
+    string? Description,
+    byte? Status,     // tinyint -> byte?
+    int? Sort_Order
+);
+
 public record BrandItemDto(string Brand_Name, int Product_Count);
 public record SuggestResponse(IReadOnlyList<string> Items);
 

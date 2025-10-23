@@ -154,25 +154,25 @@ public class AuthService : IAuthService
         }
 
         var uid = p.Get<long>("@user_info_id");
-        var legacyGuidToken = p.Get<Guid>("@token");
+        var legacyGuidToken = p.Get<Guid>("@token");                 // GUID phiên do SP trả về
         var expiresAtDt = p.Get<DateTime?>("@expires_at");
         var expiresAt = (expiresAtDt is null)
             ? DateTimeOffset.UtcNow.AddDays(30)
             : new DateTimeOffset(DateTime.SpecifyKind(expiresAtDt.Value, DateTimeKind.Utc));
 
-        // 1) Phát JWT
+        // 1) Phát JWT (đặt JTI = legacyGuidToken để có "phao" theo JTI)
         var now = DateTimeOffset.UtcNow;
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwt.Key));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
         var claims = new List<Claim>
-        {
-            new(JwtRegisteredClaimNames.Sub, uid.ToString()),
-            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("D")),
-            new(JwtRegisteredClaimNames.Iat, now.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
-            new("uid", uid.ToString()),
-            new("did", req.DeviceUuid.ToString())
-        };
+    {
+        new(JwtRegisteredClaimNames.Sub, uid.ToString()),
+        new(JwtRegisteredClaimNames.Jti, legacyGuidToken.ToString("D")),    // << đổi: JTI = GUID cũ
+        new(JwtRegisteredClaimNames.Iat, now.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
+        new("uid", uid.ToString()),
+        new("did", req.DeviceUuid.ToString())
+    };
         if (!string.IsNullOrWhiteSpace(req.DeviceModel))
             claims.Add(new Claim("dmodel", req.DeviceModel!));
 
@@ -186,13 +186,14 @@ public class AuthService : IAuthService
         );
         var jwtToken = new JwtSecurityTokenHandler().WriteToken(jwt);
 
-        // 2) Ghi đè token (NVARCHAR) trong login_history bằng JWT
+        // 2) Ghi đè token trong login_history = JWT
+        //    Match bằng token_guid = legacy GUID (an toàn hơn so sánh hash chuỗi)
         const string updSql = @"
 WITH last_row AS (
     SELECT TOP (1) id
     FROM dbo.tbl_login_history WITH (UPDLOCK, ROWLOCK)
     WHERE user_info_id = @uid
-      AND token_sha256 = CONVERT(VARBINARY(32), HASHBYTES('SHA2_256', CONVERT(VARCHAR(1024), @oldToken)))
+      AND token_guid   = @oldGuid
     ORDER BY created_at DESC, id DESC
 )
 UPDATE dbo.tbl_login_history
@@ -201,15 +202,20 @@ WHERE id IN (SELECT id FROM last_row);";
 
         try
         {
-            await con.ExecuteAsync(new CommandDefinition(
+            var affected = await con.ExecuteAsync(new CommandDefinition(
                 updSql,
-                new { uid, oldToken = legacyGuidToken.ToString(), jwt = jwtToken },
+                new { uid, oldGuid = legacyGuidToken, jwt = jwtToken },   // truyền GUID trực tiếp
                 commandType: CommandType.Text,
                 cancellationToken: ct));
+
+            if (affected == 0)
+            {
+                _logger.LogWarning("Không tìm thấy hàng login_history để cập nhật JWT cho user {UserId} (oldGuid={OldGuid})", uid, legacyGuidToken);
+            }
         }
         catch (SqlException ex)
         {
-            _logger.LogWarning(ex, "Không thể cập nhật tbl_login_history.token sang JWT cho user {UserId}", uid);
+            _logger.LogWarning(ex, "Lỗi khi cập nhật tbl_login_history.token sang JWT cho user {UserId}", uid);
         }
 
         // 3) Trả JWT cho client
@@ -222,6 +228,7 @@ WHERE id IN (SELECT id FROM last_row);";
             Message: "Đăng nhập thành công."
         );
     }
+
 
     //public async Task<LogoutResponse> LogoutAsync(Guid token, CancellationToken ct = default)
     //{

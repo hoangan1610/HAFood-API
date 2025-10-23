@@ -1,4 +1,6 @@
-﻿namespace HAShop.Api.DTOs;
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace HAShop.Api.DTOs;
 
 public record OrderItemDto(
   long Id, long Order_Id, long Variant_Id, long Product_Id, string Sku,
@@ -20,17 +22,7 @@ public record OrderHeaderDto(
 
 public record OrderDetailDto(OrderHeaderDto Header, IReadOnlyList<OrderItemDto> Items);
 
-public record PlaceOrderRequest(
-  long? Cart_Id,
-  string Ship_Name,
-  string Ship_Full_Address,
-  string Ship_Phone,
-  byte Payment_Method,
-  string Ip,
-  string? Note,
-  long? Address_Id,
-  long? Device_Id
-);
+
 
 public record PlaceOrderResponse(long Order_Id, string Order_Code);
 
@@ -42,3 +34,28 @@ public record PaymentCreateRequest(
   string? Error_Code, string? Error_Message, DateTime? Paid_At
 );
 public record PaymentCreateResponse(long Payment_Id);
+
+public record class PlaceOrderRequest
+{
+    public long? Cart_Id { get; init; }
+
+    [Required] public string Ship_Name { get; init; } = "";
+    [Required] public string Ship_Full_Address { get; init; } = "";
+    [Required] public string Ship_Phone { get; init; } = "";
+
+    [Required] public byte Payment_Method { get; init; }
+
+    public string Ip { get; init; } = "";
+    public string? Note { get; init; }
+    public long? Address_Id { get; init; }
+    public long? Device_Id { get; init; }
+
+    public string? Promo_Code { get; init; }
+    public long[]? Selected_Line_Ids { get; init; }
+    public List<CheckoutItemDto>? Items { get; init; }
+}
+public record class CheckoutItemDto
+{
+    public long Variant_Id { get; init; }
+    public int Quantity { get; init; }
+}

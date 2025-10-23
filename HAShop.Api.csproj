@@ -27,11 +27,16 @@
 		<Compile Remove="**\.env" />
 		<EmbeddedResource Remove=".env" />
 		<EmbeddedResource Remove="**\.env" />
+		<Content Remove="wwwroot\uploads\avatars\49\20251017185604348_c85d4b0e7c8a483cbaf588e0cdfc63ed.jpg" />
 
 		<!-- Keep .env as a None item and copy if needed -->
 		<None Include=".env">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Folder Include="wwwroot\uploads\avatars\" />
 	</ItemGroup>
 
 
