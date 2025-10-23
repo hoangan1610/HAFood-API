@@ -1,20 +1,35 @@
-﻿using Microsoft.EntityFrameworkCore;
-using Microsoft.OpenApi.Models;
-using Microsoft.AspNetCore.HttpOverrides;
+﻿using DotNetEnv;
 using HAShop.Api.Data;
+using HAShop.Api.Options; // <-- JwtOptions
+using HAShop.Api.Payments;
 using HAShop.Api.Services;
-using System.Data;
-using Microsoft.Extensions.Options;
-using DotNetEnv;
-
 // NEW
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+using System.Data;
 using System.Text;
-using HAShop.Api.Options; // <-- JwtOptions
 
 var builder = WebApplication.CreateBuilder(args);
+
+
+
+builder.Services.Configure<VnPayOptions>(builder.Configuration.GetSection("VnPay"));
+builder.Services.AddSingleton<VnPayService>();
+
+
+// Bind section "Payments" -> PaymentsFlags
+builder.Services.Configure<PaymentsFlags>(
+    builder.Configuration.GetSection("Payments"));
+
+// sau builder tạo ra
+builder.Services.Configure<FrontendOptions>(builder.Configuration.GetSection("Frontend"));
+
 
 // =========================================================
 // 1) Env (.env)

@@ -3,22 +3,60 @@
 namespace HAShop.Api.DTOs;
 
 public record OrderItemDto(
-  long Id, long Order_Id, long Variant_Id, long Product_Id, string Sku,
-  string? Name_Variant, decimal Price_Variant, string? Image_Variant,
-  int Quantity, decimal Line_Subtotal, DateTime Created_At, DateTime Updated_At,
-  // enrich
-  string? Product_Name, string? Brand_Name, string? Image_Product
+  long Id,
+  long Order_Id,
+  long Variant_Id,
+  long Product_Id,
+  string Sku,
+  string? Name_Variant,
+  decimal Price_Variant,
+  string? Image_Variant,
+  int Quantity,
+  decimal Line_Subtotal,
+  DateTime Created_At,
+  DateTime Updated_At,
+
+  // ĐÚNG THỨ TỰ THEO SELECT: brand_name, product_name, image_product
+  string? Brand_Name,
+  string? Product_Name,
+  string? Image_Product
 );
 
+
 public record OrderHeaderDto(
-  long Id, long User_Info_Id, long? Address_Id, string Order_Code,
-  string Ship_Name, string Ship_Full_Address, string Ship_Phone,
-  byte Status, decimal Sub_Total, decimal Discount_Total, decimal Shipping_Total,
-  decimal Vat_Total, decimal Pay_Total, string Ip, long? Device_Id,
-  byte? Payment_Method, DateTime? Placed_At, DateTime? Confirmed_At,
-  DateTime? Shipped_At, DateTime? Delivered_At, DateTime? Canceled_At,
-  string? Note, DateTime Created_At, DateTime Updated_At, long? Cart_Id
+  long Id,
+  long User_Info_Id,
+  long? Address_Id,
+  string Order_Code,
+  string Ship_Name,
+  string Ship_Full_Address,
+  string Ship_Phone,
+  byte Status,
+  decimal Sub_Total,
+  decimal Discount_Total,
+  decimal Shipping_Total,
+  decimal Vat_Total,
+  decimal Pay_Total,
+  string Ip,
+  long? Device_Id,          // đổi: nullable
+  byte? Payment_Method,     // đổi: nullable
+  DateTime? Placed_At,      // an toàn: nullable
+  DateTime? Confirmed_At,
+  DateTime? Shipped_At,
+  DateTime? Delivered_At,
+  DateTime? Canceled_At,
+  string? Note,
+  DateTime Created_At,
+  DateTime Updated_At,
+  long? Cart_Id,            // đổi: nullable
+
+  // === MỚI: các cột thanh toán ===
+  string? Payment_Status,
+  string? Payment_Provider,
+  string? Payment_Ref,
+  DateTime? Paid_At
 );
+
 
 public record OrderDetailDto(OrderHeaderDto Header, IReadOnlyList<OrderItemDto> Items);
 

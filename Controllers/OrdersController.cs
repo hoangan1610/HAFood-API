@@ -1,15 +1,43 @@
-﻿using HAShop.Api.DTOs;
-using HAShop.Api.Services;
+﻿using Dapper;
+using HAShop.Api.Data;
+using HAShop.Api.DTOs;
+using HAShop.Api.Options;           // PaymentsFlags
+using HAShop.Api.Payments;          // VnPayService
+using HAShop.Api.Services;          // IOrderService
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
+using Microsoft.Extensions.Logging;
+
+
 
 namespace HAShop.Api.Controllers;
 
 [ApiController]
 [Route("api/orders")]
-public class OrdersController(IOrderService orders) : ControllerBase
+public class OrdersController : ControllerBase
 {
+    private readonly IOrderService _orders;
+    private readonly IOptions<PaymentsFlags> _flags;
+    private readonly VnPayService _vnPay;
+    private readonly ISqlConnectionFactory _db;
+    private readonly ILogger<OrdersController> _log;
+
+    public OrdersController(
+        IOrderService orders,
+        IOptions<PaymentsFlags> flags,
+        VnPayService vnPay,
+        ISqlConnectionFactory db,
+        ILogger<OrdersController> log)
+    {
+        _orders = orders;
+        _flags = flags;
+        _vnPay = vnPay;
+        _db = db;
+        _log = log;
+    }
+
     private static long? GetUserId(ClaimsPrincipal user)
     {
         var s = user.FindFirstValue("uid") ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
@@ -32,29 +60,63 @@ public class OrdersController(IOrderService orders) : ControllerBase
     // POST /api/orders/checkout
     [Authorize]
     [HttpPost("checkout")]
-    public async Task<ActionResult<PlaceOrderResponse>> Checkout([FromBody] PlaceOrderRequest req, CancellationToken ct)
+    public async Task<ActionResult<CheckoutResponseDto>> Checkout([FromBody] PlaceOrderRequest req, CancellationToken ct)
     {
         var uid = GetUserId(User);
         if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
+        if (string.IsNullOrWhiteSpace(req.Ip)) req = req with { Ip = GetClientIp(Request) ?? "" };
 
-        // nếu FE không gửi IP thì backend tự điền
-        if (string.IsNullOrWhiteSpace(req.Ip))
-        {
-            req = req with { Ip = GetClientIp(Request) ?? "" };
-        }
+        // 1) Tạo đơn
+        var res = await _orders.PlaceFromCartAsync(uid.Value, req, ct);
 
-        try
+        // 2) Lấy tổng tiền
+        var detail = await _orders.GetAsync(res.Order_Id, ct);
+        var payTotal = (long)Math.Round(detail?.Header.Pay_Total ?? 0m, MidpointRounding.AwayFromZero);
+
+        string? paymentUrl = null;
+
+        if (req.Payment_Method == 2) // VNPAY
         {
-            var res = await orders.PlaceFromCartAsync(uid.Value, req, ct);
-            return Created($"/api/orders/{res.Order_Id}", res);
+            var orderCode = res.Order_Code;
+
+            // optional: đánh dấu pending
+            using (var con = _db.Create())
+            {
+                await con.ExecuteAsync("""
+                    UPDATE dbo.tbl_orders
+                    SET payment_status='Pending', payment_provider='VNPAY', payment_ref=@ref, updated_at=SYSDATETIME()
+                    WHERE id=@id
+                """, new { id = res.Order_Id, @ref = orderCode });
+            }
+
+            try
+            {
+                var ip = GetClientIp(Request) ?? "127.0.0.1";
+                if (ip.Contains(":")) ip = "127.0.0.1"; // ép IPv4
+
+                paymentUrl = _vnPay.CreatePaymentUrl(orderCode, payTotal, ip, $"Thanh toan don {orderCode}"
+                );
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Build VNPAY URL failed for {orderCode} amount {amount}", orderCode, payTotal);
+                // trả về 400 để FE hiện lỗi rõ ràng
+                return BadRequest(new
+                {
+                    code = "VNPAY_BUILD_FAILED",
+                    message = "Không khởi tạo được yêu cầu thanh toán.",
+                });
+            }
+
+            if (!string.IsNullOrEmpty(paymentUrl))
+            {
+                _log.LogInformation("Redirect to VNPAY: {url}", paymentUrl); // giờ _log đã có
+            }
+
+            return Ok(new CheckoutResponseDto(res.Order_Id, res.Order_Code, paymentUrl));
         }
-        catch (InvalidOperationException ex) when (ex.Message == "CART_NOT_FOUND")
-        { return NotFound(new { code = "CART_NOT_FOUND", message = "Không tìm thấy giỏ hàng." }); }
-        catch (InvalidOperationException ex) when (ex.Message == "CART_EMPTY")
-        { return BadRequest(new { code = "CART_EMPTY", message = "Giỏ hàng trống." }); }
-        catch (InvalidOperationException ex) when (ex.Message == "OUT_OF_STOCK")
-        { return BadRequest(new { code = "OUT_OF_STOCK", message = "Một số sản phẩm đã hết hàng." }); }
-        // Nếu bạn có bắt lỗi promo ở service thì thêm catch tương tự ở đây.
+        return Ok(new CheckoutResponseDto(res.Order_Id, res.Order_Code, paymentUrl));
+
     }
 
     // GET /api/orders/{id}
@@ -62,7 +124,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [HttpGet("{id:long}")]
     public async Task<ActionResult<OrderDetailDto>> Get(long id, CancellationToken ct)
     {
-        var data = await orders.GetAsync(id, ct);
+        var data = await _orders.GetAsync(id, ct);
         return data is null ? NotFound() : Ok(data);
     }
 
@@ -77,15 +139,15 @@ public class OrdersController(IOrderService orders) : ControllerBase
     {
         var uid = GetUserId(User);
         if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
-        var res = await orders.ListByUserAsync(uid.Value, status, page, pageSize, ct);
+        var res = await _orders.ListByUserAsync(uid.Value, status, page, pageSize, ct);
         return Ok(res);
     }
 
-    // POST /api/orders/{id}/status  (tuỳ bạn thêm [Authorize(Roles="admin")])
+    // POST /api/orders/{id}/status
     [HttpPost("{id:long}/status")]
     public async Task<ActionResult> UpdateStatus(long id, [FromBody] byte newStatus, CancellationToken ct)
     {
-        var ok = await orders.UpdateStatusAsync(id, newStatus, ct);
+        var ok = await _orders.UpdateStatusAsync(id, newStatus, ct);
         return ok ? Ok() : NotFound(new { code = "ORDER_NOT_FOUND" });
     }
 
@@ -93,7 +155,7 @@ public class OrdersController(IOrderService orders) : ControllerBase
     [HttpPost("payments")]
     public async Task<ActionResult<PaymentCreateResponse>> CreatePayment([FromBody] PaymentCreateRequest req, CancellationToken ct)
     {
-        var res = await orders.CreatePaymentAsync(req, ct);
+        var res = await _orders.CreatePaymentAsync(req, ct);
         return Created($"/api/orders/payments/{res.Payment_Id}", res);
     }
 }
