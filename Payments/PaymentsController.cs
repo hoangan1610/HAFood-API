@@ -40,17 +40,16 @@ public class PaymentsController : ControllerBase
     {
         _log.LogInformation("VNPAY RETURN query: {q}", Request.QueryString.Value);
 
-        // Validate chữ ký
         if (!_vnPay.ValidateSignature(Request.Query))
         {
             _log.LogWarning("VNPAY RETURN invalid signature");
-            return Redirect(ComposeFeUrl("/CartPage/ThankYou.aspx?fail=1"));
+            // ↩ quay về trang checkout và báo lỗi
+            return Redirect(ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1"));
         }
 
-        var rspCode = (string?)Request.Query["vnp_ResponseCode"]; // "00" success
-        var orderCode = (string?)Request.Query["vnp_TxnRef"];       // order_code
+        var rspCode = (string?)Request.Query["vnp_ResponseCode"]; // "00" = success
+        var orderCode = (string?)Request.Query["vnp_TxnRef"];
 
-        // (TÙY CHỌN) chốt luôn ở RETURN khi bật cờ để test nhanh (không đối chiếu amount)
         if (_flags.Value.ConfirmOnReturnIfOk &&
             rspCode == "00" &&
             !string.IsNullOrWhiteSpace(orderCode))
@@ -58,9 +57,21 @@ public class PaymentsController : ControllerBase
             await ConfirmPaymentAsync(orderCode, amountVnd: null, forceWhenReturn: true);
         }
 
-        var url = string.IsNullOrWhiteSpace(orderCode)
-            ? ComposeFeUrl("/CartPage/ThankYou.aspx")
-            : ComposeFeUrl($"/CartPage/ThankYou.aspx?code={Uri.EscapeDataString(orderCode)}" + (rspCode == "00" ? "" : "&fail=1"));
+        // ✅ SỬA: nếu thành công → ThankYou; nếu HỦY/FAIL → quay về CheckoutConfirm với payfail=1
+        string url;
+        if (rspCode == "00")
+        {
+            url = string.IsNullOrWhiteSpace(orderCode)
+                ? ComposeFeUrl("/CartPage/ThankYou.aspx")
+                : ComposeFeUrl($"/CartPage/ThankYou.aspx?code={Uri.EscapeDataString(orderCode)}");
+        }
+        else
+        {
+            // có orderCode thì đính kèm, để FE có thể hiển thị mã đơn (tuỳ bạn)
+            url = string.IsNullOrWhiteSpace(orderCode)
+                ? ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1")
+                : ComposeFeUrl($"/CartPage/CheckoutConfirm.aspx?payfail=1&code={Uri.EscapeDataString(orderCode)}");
+        }
 
         return Redirect(url);
     }

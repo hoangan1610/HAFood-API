@@ -136,15 +136,20 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("PublicCors", policy =>
         policy.WithOrigins(
+                "https://localhost:44336",   // <-- THÊM DÒNG NÀY
+                "http://localhost:44336",    // (nếu đôi khi chạy http)
                 "http://localhost:3000",
                 "https://hafood.id.vn",
+                "https://www.hafood.id.vn",  // (nếu dùng www)
                 "https://hafood-mock-api.onrender.com"
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
-            .AllowCredentials()
+            .AllowCredentials() // nếu dùng cookie auth
     );
 });
+
+
 
 // DI
 builder.Services.AddScoped<IAuthService, AuthService>();
@@ -173,56 +178,64 @@ builder.Services
         options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
         options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
     })
-    .AddJwtBearer(options =>
-    {
-        options.RequireHttpsMetadata = true;
-        options.SaveToken = true;
-        options.TokenValidationParameters = new TokenValidationParameters
-        {
-            ValidateIssuer = true,
-            ValidateAudience = true,
-            ValidateLifetime = true,
-            ValidateIssuerSigningKey = true,
-            ValidIssuer = jwtIssuer,
-            ValidAudience = jwtAudience,
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(string.IsNullOrWhiteSpace(jwtKey) ? "change-this-dev-key" : jwtKey)),
-            ClockSkew = TimeSpan.FromSeconds(30)
-        };
+   .AddJwtBearer(options =>
+   {
+       options.RequireHttpsMetadata = true;
+       options.SaveToken = true;
+       options.TokenValidationParameters = new TokenValidationParameters
+       {
+           ValidateIssuer = true,
+           ValidateAudience = true,
+           ValidateLifetime = true,
+           ValidateIssuerSigningKey = true,
+           ValidIssuer = jwtIssuer,
+           ValidAudience = jwtAudience,
+           IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(string.IsNullOrWhiteSpace(jwtKey) ? "change-this-dev-key" : jwtKey)),
+           ClockSkew = TimeSpan.FromSeconds(30)
+       };
 
-        // 401/403 thân thiện
-        options.Events = new JwtBearerEvents
-        {
-            OnChallenge = async ctx =>
-            {
-                ctx.HandleResponse();
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                ctx.Response.ContentType = "application/problem+json; charset=utf-8";
-                var json = System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    type = "about:blank",
-                    title = "UNAUTHENTICATED",
-                    status = 401,
-                    detail = "Thiếu hoặc token không hợp lệ.",
-                    traceId = ctx.HttpContext.TraceIdentifier
-                });
-                await ctx.Response.WriteAsync(json);
-            },
-            OnForbidden = async ctx =>
-            {
-                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
-                ctx.Response.ContentType = "application/problem+json; charset=utf-8";
-                var json = System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    type = "about:blank",
-                    title = "FORBIDDEN",
-                    status = 403,
-                    detail = "Bạn không có quyền truy cập tài nguyên này.",
-                    traceId = ctx.HttpContext.TraceIdentifier
-                });
-                await ctx.Response.WriteAsync(json);
-            }
-        };
-    });
+       options.Events = new JwtBearerEvents
+       {
+           // ✅ Đọc token từ cookie nếu thiếu header Authorization
+           OnMessageReceived = ctx =>
+           {
+               if (string.IsNullOrEmpty(ctx.Token))
+                   ctx.Token = ctx.Request.Cookies["AuthToken"];
+               return Task.CompletedTask;
+           },
+
+           OnChallenge = async ctx =>
+           {
+               ctx.HandleResponse();
+               ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+               ctx.Response.ContentType = "application/problem+json; charset=utf-8";
+               var json = System.Text.Json.JsonSerializer.Serialize(new
+               {
+                   type = "about:blank",
+                   title = "UNAUTHENTICATED",
+                   status = 401,
+                   detail = "Thiếu hoặc token không hợp lệ.",
+                   traceId = ctx.HttpContext.TraceIdentifier
+               });
+               await ctx.Response.WriteAsync(json);
+           },
+           OnForbidden = async ctx =>
+           {
+               ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+               ctx.Response.ContentType = "application/problem+json; charset=utf-8";
+               var json = System.Text.Json.JsonSerializer.Serialize(new
+               {
+                   type = "about:blank",
+                   title = "FORBIDDEN",
+                   status = 403,
+                   detail = "Bạn không có quyền truy cập tài nguyên này.",
+                   traceId = ctx.HttpContext.TraceIdentifier
+               });
+               await ctx.Response.WriteAsync(json);
+           }
+       };
+   });
+
 builder.Services.AddAuthorization();
 
 var app = builder.Build();

@@ -158,4 +158,32 @@ public class OrdersController : ControllerBase
         var res = await _orders.CreatePaymentAsync(req, ct);
         return Created($"/api/orders/payments/{res.Payment_Id}", res);
     }
+
+    // OrdersController.cs (thêm action)
+    [Authorize]
+    [HttpPost("switch-payment/{code}")]
+    public async Task<ActionResult<SwitchPaymentResponse>> SwitchPayment(string code, [FromBody] SwitchPaymentRequest req, CancellationToken ct)
+    {
+        try
+        {
+            var res = await _orders.SwitchPaymentAsync(code, req.New_Method, req.Reason, ct);
+            return Ok(res);
+        }
+        catch (InvalidOperationException ex) when (ex.Message == "ORDER_NOT_FOUND")
+        {
+            return NotFound(new { code = "ORDER_NOT_FOUND" });
+        }
+        catch (InvalidOperationException ex) when (ex.Message == "ORDER_ALREADY_PAID")
+        {
+            return BadRequest(new { code = "ORDER_ALREADY_PAID" });
+        }
+        catch (Exception ex)
+        {
+            // 👇 để FE show message đẹp
+            return StatusCode(500, new { code = "SWITCH_PAYMENT_FAILED", message = ex.Message });
+        }
+    }
+
+
+
 }

@@ -5,6 +5,7 @@ using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Linq;
 using System.Text.Json;
+using System.Data.Common;
 
 namespace HAShop.Api.Services;
 
@@ -15,6 +16,8 @@ public interface IOrderService
     Task<OrdersPageDto> ListByUserAsync(long userId, byte? status, int page, int pageSize, CancellationToken ct);
     Task<bool> UpdateStatusAsync(long orderId, byte newStatus, CancellationToken ct);
     Task<PaymentCreateResponse> CreatePaymentAsync(PaymentCreateRequest req, CancellationToken ct);
+
+    Task<SwitchPaymentResponse> SwitchPaymentAsync(string orderCode, byte newMethod, string? reason, CancellationToken ct);
 }
 
 public class OrderService(ISqlConnectionFactory db) : IOrderService
@@ -142,5 +145,104 @@ public class OrderService(ISqlConnectionFactory db) : IOrderService
         return new PaymentCreateResponse(p.Get<long>("@payment_id"));
     }
 
+    // OrderService.cs (thêm phương thức)
+    // Services/OrderService.cs
+    public async Task<SwitchPaymentResponse> SwitchPaymentAsync(string orderCode, byte newMethod, string? reason, CancellationToken ct)
+    {
+        using var con = db.Create();
 
-}
+        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
+        else con.Open();
+
+        using var tx = con.BeginTransaction();
+
+        try
+        {
+            // 1) Đọc order hiện tại
+            var o = await con.QueryFirstOrDefaultAsync<OrderHeaderDto>(
+                new CommandDefinition(
+                    "SELECT TOP 1 * FROM dbo.tbl_orders WHERE order_code=@c",
+                    new { c = orderCode }, transaction: tx, cancellationToken: ct));
+
+            if (o is null) throw new InvalidOperationException("ORDER_NOT_FOUND");
+            if (string.Equals(o.Payment_Status, "Paid", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("ORDER_ALREADY_PAID");
+
+            // số tiền để ghi vào payment_transaction (schema DECIMAL(12,2) NOT NULL)
+            var amount = o.Pay_Total; // decimal, không null theo DTO của bạn
+
+            // map provider theo method (đề phòng provider cũ null)
+            static string MapProvider(byte? m) => m switch
+            {
+                1 => "MOMO",
+                2 => "VNPAY",
+                0 => "COD",
+                _ => "UNKNOWN"
+            };
+
+            // Provider cũ (KHÔNG ĐƯỢC NULL do schema)
+            var oldProvider = string.IsNullOrWhiteSpace(o.Payment_Provider)
+                ? MapProvider(o.Payment_Method)
+                : o.Payment_Provider;
+
+            // 2) Ghi 1 transaction “đóng/cancel” phiên cổng cũ (nếu có cổng cũ hoặc đổi cổng)
+            if (!string.IsNullOrWhiteSpace(oldProvider) || (o.Payment_Method ?? 0) != newMethod)
+            {
+                await con.ExecuteAsync(new CommandDefinition(
+                    """
+                INSERT dbo.tbl_payment_transaction
+                    (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                     paid_at, error_code, error_message, created_at, updated_at)
+                VALUES
+                    (@oid, @prov, COALESCE(@m,0), 0, @amt, 'VND', @txid, @oref,
+                     NULL, @err, @msg, SYSDATETIME(), SYSDATETIME())
+                """,
+                    new
+                    {
+                        oid = o.Id,
+                        prov = oldProvider,                                  // ✅ NOT NULL
+                        m = o.Payment_Method,                             // tinyint NOT NULL
+                        amt = amount,                                       // ✅ DECIMAL(12,2) NOT NULL
+                        txid = Guid.NewGuid().ToString("N"),                 // ✅ NOT NULL
+                        oref = orderCode,
+                        err = "USER_SWITCH_PAYMENT",
+                        msg = reason ?? "User switched payment method"
+                    },
+                    transaction: tx, cancellationToken: ct));
+            }
+
+            // 3) Cập nhật order theo phương thức mới
+            var newProvider = MapProvider(newMethod);
+            var newStatus = (newMethod == 0) ? "Unpaid" : "Pending";
+
+            await con.ExecuteAsync(new CommandDefinition(
+                """
+            UPDATE dbo.tbl_orders
+            SET payment_method = @pm,
+                payment_provider = @prov,     -- cho phép NULL? schema orders của bạn cho phép NULL, nhưng có thể giữ tên provider luôn rõ ràng
+                payment_status = @stt,
+                payment_ref = NULL,
+                updated_at = SYSDATETIME()
+            WHERE order_code = @code
+            """,
+                new
+                {
+                    code = orderCode,
+                    pm = newMethod,
+                    prov = (newMethod == 0 ? (string?)null : newProvider),
+                    stt = newStatus
+                },
+                transaction: tx, cancellationToken: ct));
+
+            tx.Commit();
+            return new SwitchPaymentResponse(orderCode, newMethod, newStatus);
+        }
+        catch
+        {
+            try { tx.Rollback(); } catch { /* ignore */ }
+            throw;
+        }
+    }
+
+
+    }
