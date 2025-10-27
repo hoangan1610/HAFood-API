@@ -5,5 +5,6 @@ namespace HAShop.Api.Options
     {
         public bool UseFakeVnPay { get; set; }
         public bool ConfirmOnReturnIfOk { get; set; }
+        public bool ForceConfirmOnReturnForDev { get; set; }
     }
 }

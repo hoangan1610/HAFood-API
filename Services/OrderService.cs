@@ -174,7 +174,7 @@ public class OrderService(ISqlConnectionFactory db) : IOrderService
             // map provider theo method (đề phòng provider cũ null)
             static string MapProvider(byte? m) => m switch
             {
-                1 => "MOMO",
+                1 => "ZALOPAY",
                 2 => "VNPAY",
                 0 => "COD",
                 _ => "UNKNOWN"
@@ -235,7 +235,13 @@ public class OrderService(ISqlConnectionFactory db) : IOrderService
                 transaction: tx, cancellationToken: ct));
 
             tx.Commit();
-            return new SwitchPaymentResponse(orderCode, newMethod, newStatus);
+            return new SwitchPaymentResponse
+            {
+                Order_Code = orderCode,
+                New_Method = newMethod,
+                New_Status = newStatus
+            };
+
         }
         catch
         {

@@ -22,6 +22,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<VnPayOptions>(builder.Configuration.GetSection("VnPay"));
 builder.Services.AddSingleton<VnPayService>();
 
+builder.Services.Configure<ZaloPayOptions>(builder.Configuration.GetSection("Payments:ZaloPay"));
+builder.Services.AddSingleton<IZaloPayGateway, ZaloPayService>();
+
+
 
 // Bind section "Payments" -> PaymentsFlags
 builder.Services.Configure<PaymentsFlags>(
