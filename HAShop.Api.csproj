@@ -11,13 +11,16 @@
     <PackageReference Include="Dapper" Version="2.1.66" />
     <PackageReference Include="DotNetEnv" Version="3.1.1" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.20" />
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.1" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="9.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.9" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.9">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.ML" Version="3.0.1" />
+    <PackageReference Include="Scriban" Version="6.5.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.*" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.6" />
   </ItemGroup>
 
@@ -36,7 +39,12 @@
 	</ItemGroup>
 
 	<ItemGroup>
+	  <Folder Include="wwwroot\Gallery\" />
 	  <Folder Include="wwwroot\uploads\avatars\" />
+	</ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\HaFood.IntentClassifier\HaFood.IntentClassifier.csproj" />
+		
 	</ItemGroup>
 
 

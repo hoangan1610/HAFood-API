@@ -38,9 +38,9 @@ public record OrderHeaderDto(
   decimal Vat_Total,
   decimal Pay_Total,
   string Ip,
-  long? Device_Id,          // đổi: nullable
-  byte? Payment_Method,     // đổi: nullable
-  DateTime? Placed_At,      // an toàn: nullable
+  long? Device_Id,
+  byte? Payment_Method,
+  DateTime? Placed_At,
   DateTime? Confirmed_At,
   DateTime? Shipped_At,
   DateTime? Delivered_At,
@@ -48,14 +48,17 @@ public record OrderHeaderDto(
   string? Note,
   DateTime Created_At,
   DateTime Updated_At,
-  long? Cart_Id,            // đổi: nullable
+  long? Cart_Id,
 
-  // === MỚI: các cột thanh toán ===
   string? Payment_Status,
   string? Payment_Provider,
   string? Payment_Ref,
-  DateTime? Paid_At
+  DateTime? Paid_At,
+
+  // 🔴 THÊM DÒNG NÀY CHO KHỚP PROC/BẢNG
+  byte Status_Type
 );
+
 
 
 public record OrderDetailDto(OrderHeaderDto Header, IReadOnlyList<OrderItemDto> Items);

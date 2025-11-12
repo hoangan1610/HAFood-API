@@ -1,15 +1,16 @@
-﻿using Dapper;
+﻿// Controllers/OrdersController.cs
+using System.Security.Claims;
+using System.Linq;
+using Dapper;
 using HAShop.Api.Data;
 using HAShop.Api.DTOs;
 using HAShop.Api.Options;           // PaymentsFlags
 using HAShop.Api.Payments;          // VnPayService, IZaloPayGateway
 using HAShop.Api.Services;          // IOrderService
+using HAShop.Api.Utils;             // AppException
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using Microsoft.Extensions.Logging;
-using System.Security.Claims;
-using System.Linq;
 
 namespace HAShop.Api.Controllers;
 
@@ -43,7 +44,9 @@ public class OrdersController : ControllerBase
 
     private static long? GetUserId(ClaimsPrincipal user)
     {
-        var s = user.FindFirstValue("uid") ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
+        var s = user.FindFirstValue("uid")
+             ?? user.FindFirstValue(ClaimTypes.NameIdentifier)
+             ?? user.FindFirstValue("sub");
         return long.TryParse(s, out var id) ? id : null;
     }
 
@@ -66,13 +69,15 @@ public class OrdersController : ControllerBase
     public async Task<ActionResult<CheckoutResponseDto>> Checkout([FromBody] PlaceOrderRequest req, CancellationToken ct)
     {
         var uid = GetUserId(User);
-        if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
-        if (string.IsNullOrWhiteSpace(req.Ip)) req = req with { Ip = GetClientIp(Request) ?? "" };
+        if (uid is null) throw new AppException("UNAUTHENTICATED");
 
-        // 1) Tạo đơn
+        if (string.IsNullOrWhiteSpace(req.Ip))
+            req = req with { Ip = GetClientIp(Request) ?? "" };
+
+        // 1) Tạo đơn (các lỗi CART_* / OUT_OF_STOCK sẽ được service ném AppException)
         var res = await _orders.PlaceFromCartAsync(uid.Value, req, ct);
 
-        // 2) Lấy tổng tiền
+        // 2) Lấy tổng tiền để build link
         var detail = await _orders.GetAsync(res.Order_Id, ct);
         var payTotal = (long)Math.Round(detail?.Header.Pay_Total ?? 0m, MidpointRounding.AwayFromZero);
 
@@ -99,29 +104,26 @@ public class OrdersController : ControllerBase
                     amountVnd: payTotal,
                     description: $"Thanh toan don {orderCode}",
                     appUser: uid.Value.ToString(),
-                    clientReturnUrl: null, // dùng mặc định từ config
+                    clientReturnUrl: null,
                     ct: ct
                 );
 
                 paymentUrl = zp.order_url;
 
-                // Lưu app_trans_id để return truy vấn trạng thái
-                using (var con = _db.Create())
-                {
-                    await con.ExecuteAsync("""
-                        UPDATE dbo.tbl_orders
-                        SET payment_ref = @ref, updated_at = SYSDATETIME()
-                        WHERE id = @id
-                    """, new { id = res.Order_Id, @ref = zp.app_trans_id });
-                }
+                // lưu app_trans_id để truy vấn sau
+                using var con = _db.Create();
+                await con.ExecuteAsync("""
+                    UPDATE dbo.tbl_orders
+                    SET payment_status='Pending', payment_provider='ZALOPAY', payment_ref=@ref, updated_at=SYSDATETIME()
+                    WHERE id=@id
+                """, new { id = res.Order_Id, @ref = zp.app_trans_id });
             }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Build ZALOPAY order failed for {orderCode} amount {amount}", orderCode, payTotal);
-                return BadRequest(new { code = "ZALOPAY_BUILD_FAILED", message = "Không khởi tạo được yêu cầu thanh toán." });
+                throw new AppException("ZALOPAY_BUILD_FAILED", "Không khởi tạo được yêu cầu thanh toán.", ex);
             }
 
-            _log.LogInformation("Redirect to ZALOPAY: {url}", paymentUrl);
             return Ok(new CheckoutResponseDto(res.Order_Id, res.Order_Code, paymentUrl));
         }
 
@@ -142,16 +144,15 @@ public class OrdersController : ControllerBase
             try
             {
                 var ip = GetClientIp(Request) ?? "127.0.0.1";
-                if (ip.Contains(":")) ip = "127.0.0.1"; // ép IPv4
+                if (ip.Contains(":")) ip = "127.0.0.1";
                 paymentUrl = _vnPay.CreatePaymentUrl(orderCode, payTotal, ip, $"Thanh toan don {orderCode}");
             }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Build VNPAY URL failed for {orderCode} amount {amount}", orderCode, payTotal);
-                return BadRequest(new { code = "VNPAY_BUILD_FAILED", message = "Không khởi tạo được yêu cầu thanh toán." });
+                throw new AppException("VNPAY_BUILD_FAILED", "Không khởi tạo được yêu cầu thanh toán.", ex);
             }
 
-            _log.LogInformation("Redirect to VNPAY: {url}", paymentUrl);
             return Ok(new CheckoutResponseDto(res.Order_Id, res.Order_Code, paymentUrl));
         }
 
@@ -178,7 +179,8 @@ public class OrdersController : ControllerBase
         CancellationToken ct = default)
     {
         var uid = GetUserId(User);
-        if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
+        if (uid is null) throw new AppException("UNAUTHENTICATED");
+
         var res = await _orders.ListByUserAsync(uid.Value, status, page, pageSize, ct);
         return Ok(res);
     }
@@ -204,55 +206,37 @@ public class OrdersController : ControllerBase
     [HttpPost("switch-payment/{code}")]
     public async Task<ActionResult<SwitchPaymentResponse>> SwitchPayment(string code, [FromBody] SwitchPaymentRequest req, CancellationToken ct)
     {
-        try
-        {
-            var res = await _orders.SwitchPaymentAsync(code, req.New_Method, req.Reason, ct);
-            return Ok(res);
-        }
-        catch (InvalidOperationException ex) when (ex.Message == "ORDER_NOT_FOUND")
-        {
-            return NotFound(new { code = "ORDER_NOT_FOUND" });
-        }
-        catch (InvalidOperationException ex) when (ex.Message == "ORDER_ALREADY_PAID")
-        {
-            return BadRequest(new { code = "ORDER_ALREADY_PAID" });
-        }
-        catch (Exception ex)
-        {
-            // để FE show message đẹp
-            return StatusCode(500, new { code = "SWITCH_PAYMENT_FAILED", message = ex.Message });
-        }
+        // Service sẽ ném AppException("ORDER_NOT_FOUND"/"ORDER_ALREADY_PAID") -> middleware map status
+        var res = await _orders.SwitchPaymentAsync(code, req.New_Method, req.Reason, ct);
+        return Ok(res);
     }
 
     // POST /api/orders/{code}/payment-link
-    // FE gọi khi cần xin link thanh toán mới cho đơn đã tạo (sau khi hủy gateway trước đó)
     [Authorize]
     [HttpPost("{code}/payment-link")]
     public async Task<IActionResult> CreatePaymentLink(string code, [FromBody] CreatePayLinkDto dto, CancellationToken ct)
     {
-        // 1) Đổi phương thức nếu cần (idempotent)
+        // Đổi phương thức nếu cần (idempotent) – lỗi sẽ ném AppException
         var sw = await _orders.SwitchPaymentAsync(code, (byte)dto.Method, "USER_SWITCH_GATEWAY", ct);
-        if (sw == null) return NotFound(new { code = "ORDER_NOT_FOUND" });
 
-        // LƯU Ý: DTO của bạn đặt tên thuộc tính là New_Status (snake/camel khác nhau), không phải NewStatus
         if (string.Equals(sw.New_Status, "Paid", StringComparison.OrdinalIgnoreCase))
-            return BadRequest(new { code = "ORDER_ALREADY_PAID" });
+            throw new AppException("ORDER_ALREADY_PAID");
 
-        // 2) Lấy tổng tiền hiện tại
-        long? orderId = null; decimal payTotalDec = 0m;
+        // Lấy tổng tiền
+        long orderId; decimal payTotalDec;
         using (var con = _db.Create())
         {
             var row = await con.QueryFirstOrDefaultAsync(new CommandDefinition(
-                @"SELECT id, pay_total FROM dbo.tbl_orders WHERE order_code=@c",
+                "SELECT id, pay_total FROM dbo.tbl_orders WHERE order_code=@c",
                 new { c = code }, cancellationToken: ct));
-            if (row == null) return NotFound(new { code = "ORDER_NOT_FOUND" });
+            if (row == null) throw new AppException("ORDER_NOT_FOUND");
             orderId = (long)row.id;
             payTotalDec = (decimal)row.pay_total;
         }
         var payTotal = (long)Math.Round(payTotalDec, MidpointRounding.AwayFromZero);
 
-        // 3) Tạo link theo method
         string paymentUrl;
+
         if (dto.Method == 1)
         {
             // ZaloPay
@@ -268,19 +252,17 @@ public class OrdersController : ControllerBase
                 );
                 paymentUrl = zp.order_url;
 
-                using (var con = _db.Create())
-                {
-                    await con.ExecuteAsync("""
-                        UPDATE dbo.tbl_orders
-                        SET payment_status='Pending', payment_provider='ZALOPAY', payment_ref=@ref, updated_at=SYSDATETIME()
-                        WHERE order_code=@code
-                    """, new { code, @ref = zp.app_trans_id });
-                }
+                using var con = _db.Create();
+                await con.ExecuteAsync("""
+                    UPDATE dbo.tbl_orders
+                    SET payment_status='Pending', payment_provider='ZALOPAY', payment_ref=@ref, updated_at=SYSDATETIME()
+                    WHERE order_code=@code
+                """, new { code, @ref = zp.app_trans_id });
             }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Create ZALOPAY link failed for {code}", code);
-                return StatusCode(502, new { code = "PAYLINK_CREATE_FAILED", message = "ZaloPay create order failed." });
+                throw new AppException("PAYLINK_CREATE_FAILED", "ZaloPay create order failed.", ex);
             }
         }
         else if (dto.Method == 2)
@@ -292,27 +274,25 @@ public class OrdersController : ControllerBase
                 if (ip.Contains(":")) ip = "127.0.0.1";
                 paymentUrl = _vnPay.CreatePaymentUrl(code, payTotal, ip, $"Thanh toan don {code}");
 
-                using (var con = _db.Create())
-                {
-                    await con.ExecuteAsync("""
-                        UPDATE dbo.tbl_orders
-                        SET payment_status='Pending', payment_provider='VNPAY', payment_ref=@ref, updated_at=SYSDATETIME()
-                        WHERE order_code=@code
-                    """, new { code, @ref = code });
-                }
+                using var con = _db.Create();
+                await con.ExecuteAsync("""
+                    UPDATE dbo.tbl_orders
+                    SET payment_status='Pending', payment_provider='VNPAY', payment_ref=@ref, updated_at=SYSDATETIME()
+                    WHERE order_code=@code
+                """, new { code, @ref = code });
             }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Create VNPAY link failed for {code}", code);
-                return StatusCode(502, new { code = "PAYLINK_CREATE_FAILED", message = "VNPay create link failed." });
+                throw new AppException("PAYLINK_CREATE_FAILED", "VNPay create link failed.", ex);
             }
         }
         else
         {
-            return BadRequest(new { code = "UNSUPPORTED_METHOD" });
+            throw new AppException("UNSUPPORTED_METHOD");
         }
 
-        return Ok(new { payment_Url = paymentUrl });
+        return Ok(new { payment_url = paymentUrl });
     }
 
     public sealed class CreatePayLinkDto

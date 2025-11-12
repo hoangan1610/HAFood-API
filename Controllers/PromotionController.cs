@@ -1,37 +1,72 @@
-﻿using HAShop.Api.DTOs;
+﻿// File: Api/Controllers/PromotionsController.cs
+using System.Linq;
+using System.Security.Claims;
+using System.Threading;
+using System.Threading.Tasks;
+using HAShop.Api.DTOs;
 using HAShop.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Security.Claims;
 
-namespace HAShop.Api.Controllers;
-
-[ApiController]
-[Route("api")]
-public class PromotionsController(IPromotionService promos) : ControllerBase
+namespace HAShop.Api.Controllers
 {
-    // GET /api/promotions/preview?code=...&cart_id=...&subtotal=...
-    // - Nếu truyền cả cart_id và subtotal -> ưu tiên cart_id (BE tự tính).
-    // - YÊU CẦU JWT để check case new-user-only (is_new_user).
-    [Authorize]
-    [HttpGet("promotions/preview")]
-    public async Task<ActionResult<PromotionPreviewResponse>> Preview(
-        [FromQuery] string code,
-        [FromQuery(Name = "cart_id")] long? cartId,
-        [FromQuery] decimal? subtotal,
-        CancellationToken ct)
+    [ApiController]
+    [Route("api/promotions")]
+    public class PromotionsController : ControllerBase
     {
-        var uid = GetUserId(User);
-        if (uid is null)
-            return Unauthorized(new { code = "MISSING_TOKEN", message = "Thiếu JWT." });
+        private readonly IPromotionService _svc;
+        public PromotionsController(IPromotionService svc) => _svc = svc;
 
-        var res = await promos.PreviewAsync(uid.Value, code, cartId, subtotal, ct);
-        return Ok(res);
-    }
+        [HttpPost("cart/list")]
+        [AllowAnonymous]
+        [Produces("application/json")]
+        public async Task<ActionResult<PromoListResponse>> ListForCart([FromBody] PromoListRequest body, CancellationToken ct)
+        {
+            var userId = TryGetUserId(HttpContext.User);
+            var deviceUuid = Request.Headers["X-Device-Id"].FirstOrDefault();
+            var res = await _svc.ListActiveAsync(userId, deviceUuid, body, ct);
+            return Ok(res);
+        }
 
-    private static long? GetUserId(ClaimsPrincipal user)
-    {
-        var s = user.FindFirstValue("uid") ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
-        return long.TryParse(s, out var id) ? id : null;
+        [HttpPost("cart/quote")]
+        [AllowAnonymous]
+        [Produces("application/json")]
+        public async Task<ActionResult<PromoQuoteResponse>> Quote([FromBody] PromoQuoteRequest body, CancellationToken ct)
+        {
+            var userId = TryGetUserId(HttpContext.User);
+            var deviceUuid = Request.Headers["X-Device-Id"].FirstOrDefault();
+            var res = await _svc.QuoteAsync(userId, deviceUuid, body, ct);
+            return Ok(res);
+        }
+
+        [HttpPost("cart/reserve")]
+        [Authorize]
+        [Produces("application/json")]
+        public async Task<ActionResult<PromoReserveResponse>> Reserve([FromBody] PromoReserveRequest body, CancellationToken ct)
+        {
+            // cho phép reserve cho guest? ở đây yêu cầu auth (tùy chính sách)
+            var userId = TryGetUserId(HttpContext.User) ?? 0;
+            var deviceUuid = Request.Headers["X-Device-Id"].FirstOrDefault() ?? body.DeviceUuid;
+            var res = await _svc.ReserveAsync(userId, deviceUuid, body, ct);
+            return Ok(res);
+        }
+
+        [HttpPost("cart/release")]
+        [Authorize]
+        [Produces("application/json")]
+        public async Task<ActionResult<PromoReleaseResponse>> Release([FromBody] PromoReleaseRequest body, CancellationToken ct)
+        {
+            var res = await _svc.ReleaseAsync(body, ct);
+            return Ok(res);
+        }
+
+        private static long? TryGetUserId(ClaimsPrincipal user)
+        {
+            var raw = user?.FindFirstValue("sub")
+                   ?? user?.FindFirstValue("user_id")
+                   ?? user?.FindFirstValue(ClaimTypes.NameIdentifier)
+                   ?? user?.FindFirstValue("uid");
+            return long.TryParse(raw, out var id) ? id : null;
+        }
     }
 }

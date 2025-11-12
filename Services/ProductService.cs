@@ -1,15 +1,17 @@
-﻿
-using System.Data;
-namespace HAShop.Api.Services;
+﻿using System.Data;
 using Dapper;
 using HAShop.Api.Data;
 using HAShop.Api.DTOs;
 using Microsoft.Data.SqlClient;
+
+namespace HAShop.Api.Services;
+
 public interface IProductService
 {
     Task<PagedResult<ProductListItemDto>> SearchAsync(
         string? q, long? categoryId, string? brand, decimal? minPrice, decimal? maxPrice,
-        byte? status, bool onlyInStock, int page, int pageSize, string? sort, CancellationToken ct);
+        byte? status, bool onlyInStock, int page, int pageSize, string? sort,
+        int? wFrom, int? wTo, string? wJson, CancellationToken ct);
 
     Task<ProductDetailDto?> GetAsync(long id, CancellationToken ct);
     Task<ProductBySkuDto?> GetBySkuAsync(string sku, CancellationToken ct);
@@ -26,7 +28,8 @@ public class ProductService(ISqlConnectionFactory db) : IProductService
 {
     public async Task<PagedResult<ProductListItemDto>> SearchAsync(
         string? q, long? categoryId, string? brand, decimal? minPrice, decimal? maxPrice,
-        byte? status, bool onlyInStock, int page, int pageSize, string? sort, CancellationToken ct)
+        byte? status, bool onlyInStock, int page, int pageSize, string? sort,
+        int? wFrom, int? wTo, string? wJson, CancellationToken ct)
     {
         using var con = db.Create();
         var p = new DynamicParameters();
@@ -40,6 +43,9 @@ public class ProductService(ISqlConnectionFactory db) : IProductService
         p.Add("@page", page);
         p.Add("@page_size", pageSize);
         p.Add("@sort", sort);
+        p.Add("@w_from", wFrom);
+        p.Add("@w_to", wTo);
+        p.Add("@w_json", wJson);
         p.Add("@total_count", dbType: DbType.Int32, direction: ParameterDirection.Output);
 
         var items = (await con.QueryAsync<ProductListItemDto>(
@@ -50,30 +56,50 @@ public class ProductService(ISqlConnectionFactory db) : IProductService
         return new PagedResult<ProductListItemDto>(items, total, page, pageSize);
     }
 
+    // Row type an toàn cho phần header của usp_product_get (tránh cast (string) vào null)
+    private sealed class ProductRow
+    {
+        public long id { get; set; }
+        public long category_id { get; set; }
+        public string brand_name { get; set; } = "";
+        public string name { get; set; } = "";
+        public string? tag { get; set; }
+        public string? product_keyword { get; set; }
+        public string? detail { get; set; }
+        public string? image_product { get; set; }
+        public string? expiry { get; set; }
+        public byte status { get; set; }
+        public DateTime created_at { get; set; }
+        public DateTime updated_at { get; set; }
+    }
+
     public async Task<ProductDetailDto?> GetAsync(long id, CancellationToken ct)
     {
         using var con = db.Create();
         using var multi = await con.QueryMultipleAsync(new CommandDefinition(
-            "dbo.usp_product_get", new { product_id = id }, commandType: CommandType.StoredProcedure, cancellationToken: ct));
+            "dbo.usp_product_get",
+            new { product_id = id },
+            commandType: CommandType.StoredProcedure,
+            cancellationToken: ct));
 
-        var prod = await multi.ReadFirstOrDefaultAsync<dynamic>();
-        if (prod is null) return null;
+        var row = await multi.ReadFirstOrDefaultAsync<ProductRow>();
+        if (row is null) return null;
 
         var variants = (await multi.ReadAsync<VariantDto>()).ToList();
 
         return new ProductDetailDto(
-            Id: (long)prod.id,
-            Category_Id: (long)prod.category_id,
-            Brand_Name: (string)prod.brand_name,
-            Name: (string)prod.name,
-            Tag: (string?)prod.tag,
-            Product_Keyword: (string?)prod.product_keyword,
-            Detail: (string?)prod.detail,
-            Image_Product: (string)prod.image_product,
-            Expiry: (string?)prod.expiry,
-            Status: (byte)prod.status,
-            Created_At: (DateTime)prod.created_at,
-            Updated_At: (DateTime)prod.updated_at,
+            Id: row.id,
+            Category_Id: row.category_id,
+            Brand_Name: row.brand_name ?? "",
+            Name: row.name ?? "",
+            Tag: row.tag,
+            Product_Keyword: row.product_keyword,
+            Detail: row.detail,
+            Image_Product: string.IsNullOrWhiteSpace(row.image_product) ? "" : row.image_product,
+            Expiry: row.expiry,
+            Status: row.status,
+            Created_At: row.created_at,
+            Updated_At: row.updated_at,
             Variants: variants
         );
     }
@@ -122,12 +148,10 @@ public class ProductService(ISqlConnectionFactory db) : IProductService
         }
         catch (SqlException ex) when (ex.Number == 50091)
         {
-            // map upstream (404)
             throw new KeyNotFoundException("VARIANT_NOT_FOUND");
         }
         catch (SqlException ex) when (ex.Number == 50092)
         {
-            // map upstream (400)
             throw new InvalidOperationException("STOCK_NEGATIVE_REJECTED");
         }
 

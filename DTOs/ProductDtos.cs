@@ -5,21 +5,20 @@ public record ProductListItemDto(
     string Product_Name,
     string Brand_Name,
     long Category_Id,
-    string Category_Name,
+    string? Category_Name,       // LEFT JOIN có thể null
+    decimal Min_Retail_Price,
+    decimal Max_Retail_Price,
+    int Total_Stock,
+    int Has_Variants,
     byte Status,
     bool Is_Deleted,
     DateTime Created_At,
-    DateTime Updated_At,
-    int Total_Stock,
-    decimal Min_Retail_Price,   // đổi từ decimal? -> decimal
-    decimal Max_Retail_Price,   // đổi từ decimal? -> decimal
-    int Has_Variants            // đổi từ bool -> int
-)
-{
-    public bool Has_Variants_Bool => Has_Variants != 0;
-}
+    DateTime Updated_At
+);
 
 public record PagedResult<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
+
+
 
 public record VariantDto(
     long Id, string Sku, string? Name, string? Image, string? Meta_Data, int? Weight,
