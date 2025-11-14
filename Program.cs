@@ -23,6 +23,10 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using System.Data;
 using System.Text;
+using HAShop.Api.Sockets;
+using HAShop.Api.Realtime;
+// ...
+
 
 
 // =========================================================
@@ -318,6 +322,17 @@ builder.Services.AddScoped<ITrackingService, TrackingService>();
 builder.Services.AddScoped<IAddressService, AddressService>();
 builder.Services.AddScoped<IFlashSaleService, FlashSaleService>();
 
+
+
+
+builder.Services.AddSingleton<FlashSaleBroadcaster>(); // concrete
+builder.Services.AddSingleton<IFlashSaleBroadcaster>(sp =>
+    sp.GetRequiredService<FlashSaleBroadcaster>());
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<FlashSaleBroadcaster>());
+
+
+
 // ---------------------------------------------------------
 // [L] MIDDLEWARE TUỲ BIẾN (ProblemDetails writer & middleware)
 // ---------------------------------------------------------
@@ -383,6 +398,7 @@ app.UseMiddleware<ProblemDetailsExceptionMiddleware>();
 // [Q] ROUTES (Controllers + Utility endpoints)
 // ---------------------------------------------------------
 app.MapControllers();
+app.MapFlashSaleSse();
 
 // SendGrid test (giữ nguyên)
 app.MapGet("/test-email", async (ISendGridSender mailer) =>
