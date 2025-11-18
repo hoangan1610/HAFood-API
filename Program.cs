@@ -321,6 +321,7 @@ builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<ITrackingService, TrackingService>();
 builder.Services.AddScoped<IAddressService, AddressService>();
 builder.Services.AddScoped<IFlashSaleService, FlashSaleService>();
+builder.Services.AddScoped<IGamificationService, GamificationService>();
 
 
 

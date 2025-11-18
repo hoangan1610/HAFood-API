@@ -11,5 +11,9 @@ namespace HAShop.Api.Services
         Task<PromoQuoteResponse> QuoteAsync(long? userId, string? deviceUuid, PromoQuoteRequest req, CancellationToken ct = default);
         Task<PromoReserveResponse> ReserveAsync(long userIdOr0, string? deviceUuid, PromoReserveRequest req, CancellationToken ct = default);
         Task<PromoReleaseResponse> ReleaseAsync(PromoReleaseRequest req, CancellationToken ct = default);
+
+        Task<PersonalVoucherListResponse> ListMyVouchersAsync(long userId, bool includeExpired, CancellationToken ct = default);
+
+        Task<IssueVoucherResponse> IssueVoucherAsync(IssueVoucherRequest req, CancellationToken ct = default);
     }
 }

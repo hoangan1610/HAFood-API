@@ -278,7 +278,123 @@ namespace HAShop.Api.Services
                 return new PromoReleaseResponse(false, 0, -500, "Lỗi hệ thống khi release khuyến mãi.");
             }
         }
+        public async Task<PersonalVoucherListResponse> ListMyVouchersAsync(long userId, bool includeExpired, CancellationToken ct = default)
+        {
+            using var con = _dbFactory.Create();
+            await ((DbConnection)con).OpenAsync(ct);
 
+            var p = new DynamicParameters();
+            p.Add("@user_info_id", userId, DbType.Int64);
+            p.Add("@now_utc", DateTime.UtcNow, DbType.DateTime2);
+            p.Add("@include_expired", includeExpired ? 1 : 0, DbType.Byte);
+
+            var cmd = new CommandDefinition(
+                "dbo.usp_promotion_issue_list_for_user",
+                p,
+                commandType: CommandType.StoredProcedure,
+                cancellationToken: ct,
+                commandTimeout: 30
+            );
+
+            var rows = await con.QueryAsync<PersonalVoucherRow>(cmd);
+
+            var list = rows.Select(r => new PersonalVoucherDto(
+                r.id,
+                r.promotion_id,
+                r.code ?? string.Empty,
+                r.source,
+                r.status,
+                r.issued_at,
+                r.expire_at,
+                r.used_order_id,
+                r.name ?? string.Empty,
+                r.description,
+                r.type,
+                r.value,
+                r.max_discount,
+                r.min_order_amount,
+                r.apply_scope,
+                r.is_exclusive,
+                r.is_stackable,
+                r.priority,
+                r.channel
+            )).ToList();
+
+            return new PersonalVoucherListResponse(list);
+        }
+
+        public async Task<IssueVoucherResponse> IssueVoucherAsync(IssueVoucherRequest req, CancellationToken ct = default)
+        {
+            if (req is null) throw new ArgumentNullException(nameof(req));
+            if (req.PromotionId <= 0 || req.UserInfoId <= 0)
+                return new IssueVoucherResponse(false, null, string.Empty, -10, "promotion_id/user_info_id không hợp lệ.");
+
+            using var con = _dbFactory.Create();
+            await ((DbConnection)con).OpenAsync(ct);
+
+            var p = new DynamicParameters();
+            p.Add("@promotion_id", req.PromotionId, DbType.Int64);
+            p.Add("@user_info_id", req.UserInfoId, DbType.Int64);
+            p.Add("@source", req.Source, DbType.Byte);
+            p.Add("@expire_at", req.ExpireAt, DbType.DateTime2);
+            p.Add("@now_utc", DateTime.UtcNow, DbType.DateTime2);
+            p.Add("@code", req.Code, DbType.String);
+
+            p.Add("@out_id", dbType: DbType.Int64, direction: ParameterDirection.Output);
+            p.Add("@out_code", dbType: DbType.String, size: 50, direction: ParameterDirection.Output);
+            p.Add("@out_msg", dbType: DbType.String, size: 200, direction: ParameterDirection.Output);
+            p.Add("@out_status", dbType: DbType.Int32, direction: ParameterDirection.Output);
+
+            try
+            {
+                var cmd = new CommandDefinition(
+                    "dbo.usp_promotion_issue_grant",
+                    p,
+                    commandType: CommandType.StoredProcedure,
+                    cancellationToken: ct,
+                    commandTimeout: 30
+                );
+
+                await con.ExecuteAsync(cmd);
+
+                var id = p.Get<long?>("@out_id");
+                var code = p.Get<string?>("@out_code") ?? string.Empty;
+                var msg = p.Get<string?>("@out_msg") ?? string.Empty;
+                var status = p.Get<int?>("@out_status") ?? 0;
+
+                return new IssueVoucherResponse(status > 0, id, code, status, msg);
+            }
+            catch (SqlException ex)
+            {
+                _log.LogError(ex, "Issue voucher failed for promotion {PromotionId}, user {UserId}", req.PromotionId, req.UserInfoId);
+                return new IssueVoucherResponse(false, null, string.Empty, -500, "Lỗi hệ thống khi cấp voucher.");
+            }
+        }
+
+        // Row mapping cho usp_promotion_issue_list_for_user
+        private sealed class PersonalVoucherRow
+        {
+            public long id { get; init; }
+            public long promotion_id { get; init; }
+            public long user_info_id { get; init; }
+            public string? code { get; init; }
+            public byte source { get; init; }
+            public byte status { get; init; }
+            public DateTime issued_at { get; init; }
+            public DateTime? expire_at { get; init; }
+            public long? used_order_id { get; init; }
+            public string? name { get; init; }
+            public string? description { get; init; }
+            public byte type { get; init; }
+            public decimal value { get; init; }
+            public decimal? max_discount { get; init; }
+            public decimal? min_order_amount { get; init; }
+            public byte apply_scope { get; init; }
+            public bool is_exclusive { get; init; }
+            public bool is_stackable { get; init; }
+            public byte priority { get; init; }
+            public byte? channel { get; init; }
+        }
         // ======= Local mapping rows from SP =======
         private sealed class PromoCandidateRow
         {
@@ -304,5 +420,7 @@ namespace HAShop.Api.Services
             public decimal total_discount { get; init; }
             public byte? apply_scope { get; init; }
         }
+
+
     }
 }
