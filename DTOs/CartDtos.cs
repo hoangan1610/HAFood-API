@@ -18,8 +18,8 @@ public record CartItemDto(
     long Variant_Id,
     string? Name_Variant,
     decimal Price_Variant,
-    decimal Price_Base, 
-    decimal Price_Effective,        // <= NEW: effective price từ SP
+    decimal Price_Base,
+    decimal Price_Effective,
     string? Image_Variant,
     int Quantity,
     byte Status,
@@ -33,8 +33,11 @@ public record CartItemDto(
     string Product_Name,
     string Brand_Name,
     long Category_Id,
-    string Image_Product
+    string Image_Product,
+    int Variant_Weight      // 👈 THÊM Ở ĐÂY (int vì cột weight là gram)
 );
+
+
 
 public record CartViewDto(
     CartHeaderDto Header,

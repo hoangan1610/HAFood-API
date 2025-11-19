@@ -59,6 +59,11 @@ public sealed class AddressService(ISqlConnectionFactory dbFactory, ILogger<Addr
         p.Add("@phone", Norm(req.Phone), DbType.String);
         p.Add("@full_address", Norm(req.FullAddress), DbType.String);
         p.Add("@status", (byte)1, DbType.Byte);
+        p.Add("@city_code", Norm(req.CityCode), DbType.String);
+        p.Add("@city_name", Norm(req.CityName), DbType.String);
+        p.Add("@ward_code", Norm(req.WardCode), DbType.String);
+        p.Add("@ward_name", Norm(req.WardName), DbType.String);
+
 
         try
         {
@@ -93,6 +98,11 @@ public sealed class AddressService(ISqlConnectionFactory dbFactory, ILogger<Addr
         p.Add("@phone", Norm(req.Phone), DbType.String);
         p.Add("@full_address", Norm(req.FullAddress), DbType.String);
         p.Add("@status", req.Status, DbType.Byte);
+        p.Add("@city_code", Norm(req.CityCode), DbType.String);
+        p.Add("@city_name", Norm(req.CityName), DbType.String);
+        p.Add("@ward_code", Norm(req.WardCode), DbType.String);
+        p.Add("@ward_name", Norm(req.WardName), DbType.String);
+
 
         try
         {

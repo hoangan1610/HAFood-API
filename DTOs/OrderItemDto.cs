@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using System.Collections.Generic;
 
 namespace HAShop.Api.DTOs;
 
@@ -59,11 +60,7 @@ public record OrderHeaderDto(
   byte Status_Type
 );
 
-
-
 public record OrderDetailDto(OrderHeaderDto Header, IReadOnlyList<OrderItemDto> Items);
-
-
 
 public record PlaceOrderResponse(long Order_Id, string Order_Code);
 
@@ -76,6 +73,7 @@ public record PaymentCreateRequest(
 );
 public record PaymentCreateResponse(long Payment_Id);
 
+// 🔽🔽🔽 CHỖ NÀY SỬA
 public record class PlaceOrderRequest
 {
     public long? Cart_Id { get; init; }
@@ -94,7 +92,13 @@ public record class PlaceOrderRequest
     public string? Promo_Code { get; init; }
     public long[]? Selected_Line_Ids { get; init; }
     public List<CheckoutItemDto>? Items { get; init; }
+
+    // ✅ NEW: để BE tính ship / KM theo địa chỉ + khối lượng
+    public string? Ship_City_Code { get; init; }      // mã tỉnh/thành
+    public string? Ship_Ward_Code { get; init; }      // mã phường/xã
+    public int? Total_Weight_Gram { get; init; }      // tổng gram (từ Web)
 }
+
 public record class CheckoutItemDto
 {
     public long Variant_Id { get; init; }

@@ -47,6 +47,11 @@ namespace HAShop.Api.Services
             p.Add("@address_id", req.Address_Id);
             p.Add("@promo_code", req.Promo_Code);
 
+            // ✅ NEW: truyền City/Ward/Weight xuống SP
+            p.Add("@ship_city_code", req.Ship_City_Code);
+            p.Add("@ship_ward_code", req.Ship_Ward_Code);
+            p.Add("@total_weight_gram", req.Total_Weight_Gram);
+
             if (req.Selected_Line_Ids is { Length: > 0 })
             {
                 var jsonSel = JsonSerializer.Serialize(req.Selected_Line_Ids);
@@ -101,6 +106,7 @@ namespace HAShop.Api.Services
 
             return new PlaceOrderResponse(orderId, code);
         }
+
 
         public async Task<OrderDetailDto?> GetAsync(long orderId, CancellationToken ct)
         {

@@ -13,6 +13,10 @@ public sealed class AddressDto
     public string FullAddress { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
+   public string? CityCode { get; set; }
+    public string? CityName { get; set; }
+    public string? WardCode { get; set; }
+    public string? WardName { get; set; }
 }
 
 public record AddressCreateRequest(
@@ -21,7 +25,11 @@ public record AddressCreateRequest(
     bool IsDefault,
     string? FullName,
     string? Phone,
-    string FullAddress
+    string FullAddress,
+    string? CityCode,
+    string? CityName,
+    string? WardCode,
+    string? WardName
 );
 
 public record AddressUpdateRequest(
@@ -31,7 +39,11 @@ public record AddressUpdateRequest(
     string? FullName,
     string? Phone,
     string? FullAddress,
-    byte? Status           // 1=active, 0=deleted (thường không dùng ở Update, nhưng để mở rộng)
+    byte? Status,
+    string? CityCode,
+    string? CityName,
+    string? WardCode,
+    string? WardName// 1=active, 0=deleted (thường không dùng ở Update, nhưng để mở rộng)
 );
 
 public record ApiOkResponse<T>(bool Success, T Data, string? Message = null);
