@@ -1,5 +1,4 @@
-﻿// Services/OrderService.cs
-using System;
+﻿using System;
 using System.Data;
 using System.Data.Common;
 using System.Linq;
@@ -9,8 +8,10 @@ using System.Threading.Tasks;
 using Dapper;
 using HAShop.Api.Data;
 using HAShop.Api.DTOs;
-using HAShop.Api.Utils;                 // <-- dùng AppException
+using HAShop.Api.Utils;                 // AppException, NotificationTypes
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using System.Globalization;
 
 namespace HAShop.Api.Services
 {
@@ -27,10 +28,31 @@ namespace HAShop.Api.Services
     public class OrderService : IOrderService
     {
         private readonly ISqlConnectionFactory _db;
+        private readonly ILoyaltyService _loyalty;
+        private readonly INotificationService _notifications;
+        private readonly ILogger<OrderService> _logger;
+        private readonly IAdminOrderNotifier _adminOrderNotifier;
 
-        public OrderService(ISqlConnectionFactory db) => _db = db;
 
-        public async Task<PlaceOrderResponse> PlaceFromCartAsync(long userId, PlaceOrderRequest req, CancellationToken ct)
+        public OrderService(
+    ISqlConnectionFactory db,
+    ILoyaltyService loyalty,
+    INotificationService notifications,
+    IAdminOrderNotifier adminOrderNotifier,
+    ILogger<OrderService> logger)
+        {
+            _db = db;
+            _loyalty = loyalty;
+            _notifications = notifications;
+            _adminOrderNotifier = adminOrderNotifier;
+            _logger = logger;
+        }
+
+
+        public async Task<PlaceOrderResponse> PlaceFromCartAsync(
+            long userId,
+            PlaceOrderRequest req,
+            CancellationToken ct)
         {
             using var con = _db.Create();
 
@@ -47,7 +69,7 @@ namespace HAShop.Api.Services
             p.Add("@address_id", req.Address_Id);
             p.Add("@promo_code", req.Promo_Code);
 
-            // ✅ NEW: truyền City/Ward/Weight xuống SP
+            // City/Ward/Weight
             p.Add("@ship_city_code", req.Ship_City_Code);
             p.Add("@ship_ward_code", req.Ship_Ward_Code);
             p.Add("@total_weight_gram", req.Total_Weight_Gram);
@@ -81,32 +103,123 @@ namespace HAShop.Api.Services
             }
             catch (SqlException ex) when (ex.Number == 50201)
             {
-                // CART_NOT_FOUND -> 404
                 throw new AppException("CART_NOT_FOUND", ex.Message, ex);
             }
             catch (SqlException ex) when (ex.Number == 50202)
             {
-                // CART_EMPTY -> 409 (conflict nghiệp vụ)
                 throw new AppException("CART_EMPTY", ex.Message, ex);
             }
             catch (SqlException ex) when (ex.Number == 50203)
             {
-                // OUT_OF_STOCK -> 409
                 throw new AppException("OUT_OF_STOCK", ex.Message, ex);
             }
 
             var orderId = p.Get<long>("@order_id");
 
-            var code = await con.ExecuteScalarAsync<string>(new CommandDefinition(
-                "SELECT order_code FROM dbo.tbl_orders WHERE id=@id",
+            // Đọc code + tổng tiền + status để vừa trả về vừa notify
+            var row = await con.QueryFirstOrDefaultAsync(new CommandDefinition(
+                """
+    SELECT order_code,
+           pay_total,
+           status,
+           ship_full_address,
+           payment_method,
+           placed_at
+    FROM dbo.tbl_orders
+    WHERE id = @id
+    """,
                 new { id = orderId },
                 cancellationToken: ct,
                 commandTimeout: 15
-            )) ?? "";
+            ));
+
+            string code = row?.order_code ?? "";
+            decimal payTotal = row?.pay_total ?? 0m;
+            byte status = row?.status ?? (byte)0;
+            string shipFullAddress = row?.ship_full_address ?? "";
+            byte? paymentMethod = row?.payment_method;
+            DateTime? placedAt = row?.placed_at;
+
+            // Rút gọn địa chỉ để không quá dài trên Telegram
+            string? shipAddressShort = null;
+            if (!string.IsNullOrWhiteSpace(shipFullAddress))
+            {
+                shipAddressShort = shipFullAddress.Length <= 100
+                    ? shipFullAddress
+                    : shipFullAddress.Substring(0, 97) + "...";
+            }
+
+            // Tính điểm dự kiến (chưa cộng vào loyalty)
+            int estPoints = 0;
+            if (payTotal > 0)
+            {
+                estPoints = (int)Math.Floor(payTotal / 1000m);
+            }
+
+            // 🔔 Notify: ORDER_STATUS_CHANGED – Đơn mới tạo
+            try
+            {
+                var dataObj = new
+                {
+                    order_id = orderId,
+                    order_code = code,
+                    new_status = status,   // thường là 0 (Mới tạo)
+                    est_points = estPoints
+                };
+                var dataJson = JsonSerializer.Serialize(dataObj);
+
+                var title = $"Đơn {code} đã được tạo thành công";
+                string body;
+                if (estPoints > 0)
+                {
+                    body =
+                        $"Shop sẽ xác nhận đơn trong thời gian sớm nhất.\n" +
+                        $"Nếu giao thành công, bạn sẽ nhận được khoảng +{estPoints} điểm HAFood.";
+                }
+                else
+                {
+                    body = "Shop sẽ xác nhận đơn trong thời gian sớm nhất.";
+                }
+
+                await _notifications.CreateInAppAsync(
+                    userId,
+                    NotificationTypes.ORDER_STATUS_CHANGED,
+                    title,
+                    body,
+                    dataJson,
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Send ORDER_STATUS_CHANGED (created) failed for order {OrderId}, user {UserId}",
+                    orderId, userId);
+            }
+
+            // 🔔 Thông báo ADMIN: có đơn mới (Telegram)
+            try
+            {
+                await _adminOrderNotifier.NotifyNewOrderAsync(
+                    orderId,
+                    code,
+                    payTotal,
+                    req.Ship_Name,
+                    req.Ship_Phone,
+                    shipAddressShort,
+                    paymentMethod,
+                    placedAt,
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Notify admin new order failed. OrderId={OrderId}, Code={OrderCode}",
+                    orderId, code);
+            }
 
             return new PlaceOrderResponse(orderId, code);
-        }
 
+        }
 
         public async Task<OrderDetailDto?> GetAsync(long orderId, CancellationToken ct)
         {
@@ -125,7 +238,12 @@ namespace HAShop.Api.Services
             return new OrderDetailDto(header, items);
         }
 
-        public async Task<OrdersPageDto> ListByUserAsync(long userId, byte? status, int page, int pageSize, CancellationToken ct)
+        public async Task<OrdersPageDto> ListByUserAsync(
+            long userId,
+            byte? status,
+            int page,
+            int pageSize,
+            CancellationToken ct)
         {
             using var con = _db.Create();
             var p = new DynamicParameters();
@@ -147,9 +265,15 @@ namespace HAShop.Api.Services
             return new OrdersPageDto(items, total, page, pageSize);
         }
 
+        /// <summary>
+        /// Update trạng thái đơn.
+        /// Nếu newStatus = 3 (Đã giao) → cộng điểm loyalty + notify loyalty.
+        /// Bất kỳ status nào thay đổi → bắn ORDER_STATUS_CHANGED.
+        /// </summary>
         public async Task<bool> UpdateStatusAsync(long orderId, byte newStatus, CancellationToken ct)
         {
             using var con = _db.Create();
+
             try
             {
                 await con.ExecuteAsync(new CommandDefinition(
@@ -162,9 +286,147 @@ namespace HAShop.Api.Services
             }
             catch (SqlException ex) when (ex.Number == 50211)
             {
-                // ORDER_NOT_FOUND (ví dụ) -> false
+                // ORDER_NOT_FOUND
                 return false;
             }
+
+            // Đọc lại order để có user_id, code, pay_total
+            long? userId = null;
+            string orderCode = "";
+            decimal payTotal = 0m;
+
+            try
+            {
+                var row = await con.QueryFirstOrDefaultAsync(new CommandDefinition(
+                    """
+                    SELECT user_info_id, order_code, pay_total
+                    FROM dbo.tbl_orders
+                    WHERE id = @id
+                    """,
+                    new { id = orderId },
+                    cancellationToken: ct,
+                    commandTimeout: 15
+                ));
+
+                if (row != null)
+                {
+                    userId = (long)row.user_info_id;
+                    orderCode = (string)row.order_code;
+                    payTotal = (decimal)row.pay_total;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Error fetching order after usp_order_update_status. OrderId={OrderId}",
+                    orderId);
+            }
+
+            // 🔔 Notify: ORDER_STATUS_CHANGED cho mọi trạng thái
+            if (userId.HasValue)
+            {
+                try
+                {
+                    int estPoints = 0;
+                    if (payTotal > 0)
+                    {
+                        estPoints = (int)Math.Floor(payTotal / 1000m);
+                    }
+
+                    string title;
+                    string body;
+
+                    switch (newStatus)
+                    {
+                        case 0:
+                            title = $"Đơn {orderCode} đang chờ xác nhận";
+                            body = "Đơn hàng của bạn đã được tạo và đang chờ shop xác nhận.";
+                            break;
+                        case 1:
+                            title = $"Đơn {orderCode} đã được shop xác nhận";
+                            body = "Shop đã xác nhận đơn hàng của bạn, chuẩn bị giao.";
+                            break;
+                        case 2:
+                            title = $"Đơn {orderCode} đang được giao";
+                            body = "Đơn hàng của bạn đang trên đường giao.";
+                            break;
+                        case 3:
+                            title = $"Đơn {orderCode} đã giao thành công";
+                            body = "Cảm ơn bạn đã mua hàng tại HAFood!";
+                            break;
+                        case 4:
+                            title = $"Đơn {orderCode} đã bị huỷ";
+                            body = "Đơn hàng của bạn đã bị huỷ. Nếu cần hỗ trợ, vui lòng liên hệ HAFood.";
+                            break;
+                        default:
+                            title = $"Đơn {orderCode} vừa được cập nhật trạng thái";
+                            body = "Đơn hàng của bạn vừa có cập nhật mới.";
+                            break;
+                    }
+
+                    var dataObj = new
+                    {
+                        order_id = orderId,
+                        order_code = orderCode,
+                        new_status = newStatus,
+                        est_points = estPoints
+                    };
+                    var dataJson = JsonSerializer.Serialize(dataObj);
+
+                    await _notifications.CreateInAppAsync(
+                        userId.Value,
+                        NotificationTypes.ORDER_STATUS_CHANGED,
+                        title,
+                        body,
+                        dataJson,
+                        ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "Send ORDER_STATUS_CHANGED failed for order {OrderId}, user {UserId}",
+                        orderId, userId);
+                }
+            }
+
+            // Nếu KHÔNG phải trạng thái "Đã giao" → không cộng điểm, return
+            if (newStatus != 3 || !userId.HasValue)
+                return true;
+
+            // Đã giao: cộng loyalty (đã có SP kiểm tra status = 3)
+            try
+            {
+                // Rule: 1 điểm / 1.000đ
+                int points = 0;
+                if (payTotal > 0)
+                {
+                    points = (int)Math.Floor(payTotal / 1000m);
+                }
+
+                if (points > 0)
+                {
+                    var reason = $"Hoàn tất đơn hàng #{orderId}";
+                    await _loyalty.AddPointsFromOrderAsync(
+                        userId.Value,
+                        orderId,
+                        points,
+                        reason,
+                        ct);
+                }
+            }
+            catch (AppException ex)
+            {
+                _logger.LogError(ex,
+                    "AddPointsFromOrderAsync failed for Order {OrderId}, User {UserId}",
+                    orderId, userId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Unexpected error when adding loyalty points for Order {OrderId}, User {UserId}",
+                    orderId, userId);
+            }
+
             return true;
         }
 
@@ -196,7 +458,11 @@ namespace HAShop.Api.Services
             return new PaymentCreateResponse(p.Get<long>("@payment_id"));
         }
 
-        public async Task<SwitchPaymentResponse> SwitchPaymentAsync(string orderCode, byte newMethod, string? reason, CancellationToken ct)
+        public async Task<SwitchPaymentResponse> SwitchPaymentAsync(
+            string orderCode,
+            byte newMethod,
+            string? reason,
+            CancellationToken ct)
         {
             using var con = _db.Create();
 
@@ -207,7 +473,6 @@ namespace HAShop.Api.Services
 
             try
             {
-                // 1) Đọc order hiện tại
                 var o = await con.QueryFirstOrDefaultAsync<OrderHeaderDto>(new CommandDefinition(
                     "SELECT TOP 1 * FROM dbo.tbl_orders WHERE order_code=@c",
                     new { c = orderCode },
@@ -234,7 +499,6 @@ namespace HAShop.Api.Services
                     ? MapProvider(o.Payment_Method)
                     : o.Payment_Provider;
 
-                // 2) Ghi 1 transaction đóng phiên cổng cũ (nếu có cổng cũ hoặc đổi cổng)
                 if (!string.IsNullOrWhiteSpace(oldProvider) || (o.Payment_Method ?? 0) != newMethod)
                 {
                     await con.ExecuteAsync(new CommandDefinition(
@@ -263,7 +527,6 @@ namespace HAShop.Api.Services
                     ));
                 }
 
-                // 3) Update order sang phương thức mới
                 var newProvider = MapProvider(newMethod);
                 var newStatus = (newMethod == 0) ? "Unpaid" : "Pending";
 

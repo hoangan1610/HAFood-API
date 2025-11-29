@@ -1,69 +1,134 @@
-﻿using HAShop.Api.DTOs;
+﻿using System.Security.Claims;
+using HAShop.Api.DTOs;
 using HAShop.Api.Services;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Security.Claims;
 
 namespace HAShop.Api.Controllers;
 
 [ApiController]
 [Route("api/notifications")]
-public class NotificationsController(INotificationService svc) : ControllerBase
+[Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
+public class NotificationsController : ControllerBase
 {
-    private static long? GetUid(ClaimsPrincipal user)
+    private readonly INotificationService _svc;
+
+    public NotificationsController(INotificationService svc) => _svc = svc;
+
+    // GET /api/notifications/latest?take=10
+    [HttpGet("latest")]
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(ApiOkResponse<NotificationLatestResultDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiOkResponse<NotificationLatestResultDto>>> GetLatest(
+        [FromQuery] int take = 10,
+        CancellationToken ct = default)
     {
-        var s = user.FindFirstValue("uid") ?? user.FindFirstValue(ClaimTypes.NameIdentifier);
-        return long.TryParse(s, out var id) ? id : null;
+        var userId = GetUserIdFromClaims(User);
+        if (userId is null)
+            return Unauthorized(BuildProblem("UNAUTHENTICATED", StatusCodes.Status401Unauthorized));
+
+        if (take <= 0 || take > 50) take = 10;
+
+        const byte channel = 1; // in-app
+
+        var result = await _svc.GetLatestAsync(userId.Value, channel, take, ct);
+        return Ok(new ApiOkResponse<NotificationLatestResultDto>(true, result));
     }
 
-    // GET /api/notifications?status=&page=&page_size=
-    [Authorize]
+    // GET /api/notifications?page=1&pageSize=20&onlyUnread=false&type=1
     [HttpGet]
-    public async Task<ActionResult<NotificationsPageDto>> List([FromQuery] byte? status, [FromQuery] int page = 1, [FromQuery(Name = "page_size")] int pageSize = 20, CancellationToken ct = default)
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(ApiOkResponse<NotificationPagedResultDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiOkResponse<NotificationPagedResultDto>>> GetPaged(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        [FromQuery] bool onlyUnread = false,
+        [FromQuery] byte? type = null,
+        CancellationToken ct = default)
     {
-        var uid = GetUid(User);
-        if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
-        var res = await svc.ListByUserAsync(uid.Value, status, page, pageSize, ct);
-        return Ok(res);
-    }
+        var userId = GetUserIdFromClaims(User);
+        if (userId is null)
+            return Unauthorized(BuildProblem("UNAUTHENTICATED", StatusCodes.Status401Unauthorized));
 
-    // GET /api/notifications/unread-count
-    [Authorize]
-    [HttpGet("unread-count")]
-    public async Task<ActionResult<UnreadCountDto>> UnreadCount(CancellationToken ct)
-    {
-        var uid = GetUid(User);
-        if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
-        var cnt = await svc.GetUnreadCountAsync(uid.Value, ct);
-        return Ok(new UnreadCountDto(cnt));
+        if (page <= 0) page = 1;
+        if (pageSize <= 0 || pageSize > 200) pageSize = 20;
+
+        const byte channel = 1; // in-app
+
+        var result = await _svc.GetPagedAsync(
+            userId.Value, page, pageSize, channel, onlyUnread, type, ct);
+
+        return Ok(new ApiOkResponse<NotificationPagedResultDto>(true, result));
     }
 
     // POST /api/notifications/{id}/read
-    [Authorize]
     [HttpPost("{id:long}/read")]
-    public async Task<ActionResult> MarkRead(long id, CancellationToken ct)
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(ApiOkResponse<bool>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiOkResponse<bool>>> MarkRead(
+        long id,
+        CancellationToken ct = default)
     {
-        await svc.MarkReadAsync(id, ct);
-        return Ok();
+        var userId = GetUserIdFromClaims(User);
+        if (userId is null)
+            return Unauthorized(BuildProblem("UNAUTHENTICATED", StatusCodes.Status401Unauthorized));
+
+        var ok = await _svc.MarkReadAsync(userId.Value, id, ct);
+        if (!ok)
+        {
+            return NotFound(BuildProblem("NOTIFICATION_NOT_FOUND",
+                StatusCodes.Status404NotFound,
+                $"Notification {id} not found or already read."));
+        }
+
+        return Ok(new ApiOkResponse<bool>(true, true, "Đã đánh dấu đã đọc."));
     }
 
     // POST /api/notifications/read-all
-    [Authorize]
     [HttpPost("read-all")]
-    public async Task<ActionResult> MarkAllRead(CancellationToken ct)
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(ApiOkResponse<int>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ApiOkResponse<int>>> MarkAllRead(
+        CancellationToken ct = default)
     {
-        var uid = GetUid(User);
-        if (uid is null) return Unauthorized(new { code = "UNAUTHENTICATED" });
-        await svc.MarkAllReadAsync(uid.Value, ct);
-        return Ok();
+        var userId = GetUserIdFromClaims(User);
+        if (userId is null)
+            return Unauthorized(BuildProblem("UNAUTHENTICATED", StatusCodes.Status401Unauthorized));
+
+        const byte channel = 1; // in-app
+
+        var affected = await _svc.MarkAllReadAsync(userId.Value, channel, ct);
+
+        return Ok(new ApiOkResponse<int>(true, affected, "Đã đánh dấu tất cả thông báo là đã đọc."));
     }
 
-    // POST /api/notifications/{id}/delivered
-    [Authorize]
-    [HttpPost("{id:long}/delivered")]
-    public async Task<ActionResult> MarkDelivered(long id, CancellationToken ct)
+    // ===== helpers (copy style từ AddressesController) =====
+
+    private static long? GetUserIdFromClaims(ClaimsPrincipal user)
     {
-        await svc.MarkDeliveredAsync(id, ct);
-        return Ok();
+        string? raw =
+            user.FindFirstValue("sub") ??
+            user.FindFirstValue("user_id") ??
+            user.FindFirstValue(ClaimTypes.NameIdentifier) ??
+            user.FindFirstValue("uid");
+
+        return long.TryParse(raw, out var id) ? id : null;
+    }
+
+    private ProblemDetails BuildProblem(string code, int status, string? tech = null)
+    {
+        var pd = new ProblemDetails
+        {
+            Title = code,
+            Detail = tech ?? code,
+            Status = status,
+            Type = "about:blank"
+        };
+        pd.Extensions["traceId"] = HttpContext?.TraceIdentifier ?? string.Empty;
+        pd.Extensions["code"] = code;
+        if (!string.IsNullOrWhiteSpace(tech))
+            pd.Extensions["techMessage"] = tech;
+        return pd;
     }
 }

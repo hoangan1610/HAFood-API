@@ -323,7 +323,8 @@ builder.Services.AddScoped<IAddressService, AddressService>();
 builder.Services.AddScoped<IFlashSaleService, FlashSaleService>();
 builder.Services.AddScoped<IGamificationService, GamificationService>();
 builder.Services.AddScoped<IShippingService, ShippingService>();
-
+builder.Services.AddScoped<IReviewService, ReviewService>();
+builder.Services.AddScoped<ILoyaltyService, LoyaltyService>();
 
 
 builder.Services.AddSingleton<FlashSaleBroadcaster>(); // concrete
@@ -332,6 +333,8 @@ builder.Services.AddSingleton<IFlashSaleBroadcaster>(sp =>
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<FlashSaleBroadcaster>());
 
+// Sau builder.Services.AddControllers(); ... các service khác
+builder.Services.AddHttpClient<IAdminOrderNotifier, TelegramAdminOrderNotifier>();
 
 
 // ---------------------------------------------------------
