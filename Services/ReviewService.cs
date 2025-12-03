@@ -59,16 +59,20 @@ namespace HAShop.Api.Services
         private readonly ISqlConnectionFactory _dbFactory;
         private readonly ILogger<ReviewService> _logger;
         private readonly INotificationService _notifications;
+        private readonly IMissionService _missions;   // ✅ thêm
 
         public ReviewService(
             ISqlConnectionFactory dbFactory,
             ILogger<ReviewService> logger,
-            INotificationService notifications)
+            INotificationService notifications,
+            IMissionService missions)                 // ✅ inject thêm
         {
             _dbFactory = dbFactory;
             _logger = logger;
             _notifications = notifications;
+            _missions = missions;
         }
+
 
         // =========== CREATE ===========
         public async Task<ProductReviewCreateResponse> CreateAsync(
@@ -122,6 +126,25 @@ namespace HAShop.Api.Services
                 var id = p.Get<long>("@review_id");
                 var verified = p.Get<bool?>("@is_verified_purchase");
 
+                // ✅ Gọi mission review sau khi tạo review thành công
+                try
+                {
+                    await _missions.CheckReviewMissionsAsync(
+                        reviewId: id,
+                        userId: userId,
+                        productId: req.Product_Id,
+                        orderId: req.Order_Id,
+                        rating: req.Rating,
+                        ct: ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "CheckReviewMissionsAsync failed. ReviewId={ReviewId}, UserId={UserId}",
+                        id, userId);
+                    // Không throw để không làm fail API review
+                }
+
                 return new ProductReviewCreateResponse
                 {
                     Success = true,
@@ -145,6 +168,7 @@ namespace HAShop.Api.Services
                 throw new AppException("RATING_INVALID", ex.Message, ex);
             }
         }
+
 
         // =========== SET STATUS (ADMIN) ===========
         public async Task<ProductReviewStatusUpdateResponse> SetStatusAsync(

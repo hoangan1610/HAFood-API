@@ -58,6 +58,41 @@ namespace HAShop.Api.Controllers
             return Ok(dto);
         }
 
+        // ================== NEW: ĐỔI ĐIỂM LOYALTY ==================
+        /// <summary>
+        /// Đổi điểm loyalty để lấy reward (lượt quay / voucher / quà...).
+        /// </summary>
+        [Authorize]
+        [HttpPost("loyalty/redeem")]
+        public async Task<ActionResult<LoyaltyRedeemResponseDto>> RedeemLoyalty(
+            [FromBody] LoyaltyRedeemRequestDto body,
+            [FromQuery] byte channel = 1,
+            CancellationToken ct = default)
+        {
+            var uid = GetUserId(User);
+            if (uid is null) throw new AppException("UNAUTHENTICATED");
+
+            if (body is null)
+                throw new AppException("INVALID_REQUEST");
+
+            var ip = GetClientIp(Request);
+            long? deviceId = null; // TODO: sau này nếu dùng device_id thì bind thêm
+
+            var qty = body.Quantity <= 0 ? 1 : body.Quantity;
+
+            var res = await _gam.RedeemRewardAsync(
+                userInfoId: uid.Value,
+                rewardId: body.RewardId,
+                quantity: qty,
+                channel: channel,
+                deviceId: deviceId,
+                ip: ip,
+                ct: ct);
+
+            return Ok(res);
+        }
+        // ================== END NEW ==================
+
         /// <summary>
         /// Điểm danh (mỗi ngày 1 lần), nhận điểm + lượt quay.
         /// </summary>
@@ -127,7 +162,37 @@ namespace HAShop.Api.Controllers
             return cfg is null ? NotFound(new { code = "NO_SPIN_CONFIG" }) : Ok(cfg);
         }
 
+        /// <summary>
+        /// Trạng thái gamification tổng: đã điểm danh hôm nay chưa,
+        /// còn bao nhiêu lượt quay, tổng điểm hiện tại, streak,...
+        /// </summary>
+        [Authorize]
+        [HttpGet("status")]
+        public async Task<ActionResult<GamStatusDto>> GetStatus(
+            [FromQuery] byte? channel = 1,
+            CancellationToken ct = default)
+        {
+            var uid = GetUserId(User);
+            if (uid is null) throw new AppException("UNAUTHENTICATED");
+
+            var res = await _gam.GetStatusAsync(uid.Value, channel, ct);
+            return Ok(res);
+        }
+
+
+        // GET /api/gam/loyalty/rewards?channel=1
+        [Authorize]
+        [HttpGet("loyalty/rewards")]
+        public async Task<ActionResult<IReadOnlyList<LoyaltyRewardDto>>> GetLoyaltyRewards(
+            [FromQuery] byte? channel = 1,
+            CancellationToken ct = default)
+        {
+            var uid = GetUserId(User);
+            if (uid is null) throw new AppException("UNAUTHENTICATED");
+
+            var res = await _gam.GetLoyaltyRewardsAsync(channel, ct);
+            return Ok(res);
+        }
+
     }
-
-
 }

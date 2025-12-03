@@ -17,6 +17,20 @@ namespace HAShop.Api.Services
 
         Task<GamSpinConfigDto?> GetActiveSpinConfigAsync(byte? channel, CancellationToken ct);
         Task<GamStatusDto> GetStatusAsync(long userInfoId, byte? channel, CancellationToken ct);
+
+        Task<LoyaltyRedeemResponseDto> RedeemRewardAsync(
+       long userInfoId,
+       long rewardId,
+       int quantity,
+       byte channel,
+       long? deviceId,
+       string? ip,
+       CancellationToken ct);
+
+        Task<IReadOnlyList<LoyaltyRewardDto>> GetLoyaltyRewardsAsync(
+    byte? channel,
+    CancellationToken ct);
+
     }
 
     public sealed class GamificationService : IGamificationService
@@ -521,5 +535,93 @@ namespace HAShop.Api.Services
                 Streak_Days: streakDays
             );
         }
+
+        public async Task<LoyaltyRedeemResponseDto> RedeemRewardAsync(
+    long userInfoId,
+    long rewardId,
+    int quantity,
+    byte channel,
+    long? deviceId,
+    string? ip,
+    CancellationToken ct)
+        {
+            using var con = _db.Create();
+
+            var p = new DynamicParameters();
+            p.Add("@user_info_id", userInfoId);
+            p.Add("@reward_id", rewardId);
+            p.Add("@quantity", quantity);
+            p.Add("@channel", channel);
+            p.Add("@ip", ip);
+
+            var row = await con.QueryFirstAsync(new CommandDefinition(
+                "dbo.usp_loyalty_redeem_reward",
+                p,
+                commandType: CommandType.StoredProcedure,
+                cancellationToken: ct));
+
+            var dto = new LoyaltyRedeemResponseDto(
+                Success: (bool)row.success,
+                Error_Code: row.error_code as string,
+                Error_Message: row.error_message as string,
+                Points_Spent: row.points_spent is null ? null : (int?)row.points_spent,
+                Total_Points: row.total_points is null ? null : (int?)row.total_points,
+                Spins_Created: row.spins_created is null ? null : (int?)row.spins_created,
+                Promotion_Code: row.promotion_code as string,
+                Promotion_Issue_Id: row.promotion_issue_id is null ? null : (long?)row.promotion_issue_id
+            );
+
+            // Nếu muốn sau này có notify "đã đổi quà", có thể dùng _notifications ở đây (TODO).
+
+            return dto;
+        }
+
+        public async Task<IReadOnlyList<LoyaltyRewardDto>> GetLoyaltyRewardsAsync(
+    byte? channel,
+    CancellationToken ct)
+        {
+            using var con = _db.Create();
+
+            var p = new DynamicParameters();
+            p.Add("@channel", channel);
+
+            var rows = await con.QueryAsync(new CommandDefinition(
+                """
+        SELECT id,
+               name,
+               description,
+               points_cost,
+               reward_type,
+               spins_created,
+               promotion_id
+        FROM dbo.tbl_loyalty_reward
+        WHERE status = 1
+          AND (start_at IS NULL OR start_at <= SYSDATETIME())
+          AND (end_at   IS NULL OR end_at   >= SYSDATETIME())
+          AND (@channel IS NULL OR channel IS NULL OR channel = @channel)
+        ORDER BY points_cost, id
+        """,
+                p,
+                commandType: CommandType.Text,
+                cancellationToken: ct));
+
+            var list = new List<LoyaltyRewardDto>();
+            foreach (var r in rows)
+            {
+                list.Add(new LoyaltyRewardDto(
+                    Id: (long)r.id,
+                    Name: (string)r.name,
+                    Description: r.description as string,
+                    Points_Cost: (int)r.points_cost,
+                    Reward_Type: (byte)r.reward_type,
+                    Spins_Created: r.spins_created is null ? null : (int?)r.spins_created,
+                    Promotion_Id: r.promotion_id is null ? null : (long?)r.promotion_id
+                ));
+            }
+
+            return list;
+        }
+
+
     }
 }

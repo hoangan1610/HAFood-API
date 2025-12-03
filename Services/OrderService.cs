@@ -32,6 +32,7 @@ namespace HAShop.Api.Services
         private readonly INotificationService _notifications;
         private readonly ILogger<OrderService> _logger;
         private readonly IAdminOrderNotifier _adminOrderNotifier;
+        private readonly IMissionService _missions;
 
 
         public OrderService(
@@ -39,12 +40,14 @@ namespace HAShop.Api.Services
     ILoyaltyService loyalty,
     INotificationService notifications,
     IAdminOrderNotifier adminOrderNotifier,
+    IMissionService missions,
     ILogger<OrderService> logger)
         {
             _db = db;
             _loyalty = loyalty;
             _notifications = notifications;
             _adminOrderNotifier = adminOrderNotifier;
+            _missions = missions;
             _logger = logger;
         }
 
@@ -291,18 +294,20 @@ namespace HAShop.Api.Services
             }
 
             // Đọc lại order để có user_id, code, pay_total
+            // Đọc lại order để có user_id, code, pay_total, delivered_at
             long? userId = null;
             string orderCode = "";
             decimal payTotal = 0m;
+            DateTime? deliveredAt = null;   // <--- THÊM BIẾN NÀY
 
             try
             {
                 var row = await con.QueryFirstOrDefaultAsync(new CommandDefinition(
                     """
-                    SELECT user_info_id, order_code, pay_total
-                    FROM dbo.tbl_orders
-                    WHERE id = @id
-                    """,
+        SELECT user_info_id, order_code, pay_total, delivered_at
+        FROM dbo.tbl_orders
+        WHERE id = @id
+        """,
                     new { id = orderId },
                     cancellationToken: ct,
                     commandTimeout: 15
@@ -313,8 +318,10 @@ namespace HAShop.Api.Services
                     userId = (long)row.user_info_id;
                     orderCode = (string)row.order_code;
                     payTotal = (decimal)row.pay_total;
+                    deliveredAt = (DateTime?)row.delivered_at;   // <--- GÁN
                 }
             }
+
             catch (Exception ex)
             {
                 _logger.LogError(ex,
@@ -390,6 +397,7 @@ namespace HAShop.Api.Services
             }
 
             // Nếu KHÔNG phải trạng thái "Đã giao" → không cộng điểm, return
+            // Nếu KHÔNG phải trạng thái "Đã giao" → không cộng điểm, return
             if (newStatus != 3 || !userId.HasValue)
                 return true;
 
@@ -427,7 +435,25 @@ namespace HAShop.Api.Services
                     orderId, userId);
             }
 
+            // ✅ Gọi Mission Engine sau khi đơn đã giao
+            try
+            {
+                await _missions.CheckOrderMissionsAsync(
+                    orderId,
+                    userId.Value,
+                    payTotal,
+                    deliveredAt,
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "CheckOrderMissionsAsync failed for Order {OrderId}, User {UserId}",
+                    orderId, userId);
+            }
+
             return true;
+
         }
 
         public async Task<PaymentCreateResponse> CreatePaymentAsync(PaymentCreateRequest req, CancellationToken ct)

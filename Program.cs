@@ -325,6 +325,8 @@ builder.Services.AddScoped<IGamificationService, GamificationService>();
 builder.Services.AddScoped<IShippingService, ShippingService>();
 builder.Services.AddScoped<IReviewService, ReviewService>();
 builder.Services.AddScoped<ILoyaltyService, LoyaltyService>();
+builder.Services.AddScoped<IMissionService, MissionService>();
+
 
 
 builder.Services.AddSingleton<FlashSaleBroadcaster>(); // concrete
