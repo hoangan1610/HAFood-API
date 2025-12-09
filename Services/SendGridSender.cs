@@ -1,80 +1,47 @@
-﻿using System.Net.Http.Json;
+﻿using System.Net;
+using System.Net.Mail;
+using System.Text;
 using System.Text.Json;
+using HAShop.Api.Options;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace HAShop.Api.Services
 {
+    /// <summary>
+    /// Thực tế giờ là SMTP sender, nhưng giữ tên SendGridSender
+    /// để không phải đổi DI / interface.
+    /// </summary>
     public class SendGridSender : ISendGridSender
     {
-        private readonly HttpClient _http;
-        private readonly SendGridOptions _opt;
-        private static readonly Uri _uri = new("https://api.sendgrid.com/v3/mail/send");
+        private readonly SmtpOptions _smtp;
+        private readonly ILogger<SendGridSender> _log;
 
-        public SendGridSender(IHttpClientFactory f, IOptions<SendGridOptions> opt)
+        public SendGridSender(
+            IOptions<SmtpOptions> smtpOptions,
+            ILogger<SendGridSender> log)
         {
-            _http = f.CreateClient(nameof(SendGridSender));
-            _opt = opt.Value;
+            _smtp = smtpOptions.Value;
+            _log = log;
 
-            if (string.IsNullOrWhiteSpace(_opt.ApiKey))
+            if (string.IsNullOrWhiteSpace(_smtp.Host))
+                throw new InvalidOperationException("SMTP host is missing (Smtp:Host).");
+
+            if (string.IsNullOrWhiteSpace(_smtp.FromEmail))
             {
-                throw new InvalidOperationException("⚠️ SendGrid API key is missing. Please set SENDGRID_API_KEY in your environment variables or .env file.");
+                // fallback: dùng User làm FromEmail
+                _smtp.FromEmail = _smtp.User;
             }
-
-            _http.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _opt.ApiKey);
         }
 
-        // ✅ Implement interface
-        public Task SendTemplateAsync(string to, string templateId, object variables, CancellationToken ct = default)
-            => SendTemplateCoreAsync(to, templateId, variables, ct, subjectOverride: null);
+        // ===== Interface chính: dùng cho EmailQueueWorker =====
 
-        // 🔧 Core có thêm subjectOverride
-        private async Task SendTemplateCoreAsync(
+        public Task SendTemplateAsync(
             string to,
             string templateId,
             object variables,
-            CancellationToken ct,
-            string? subjectOverride)
-        {
-            // ⚙️ Tạo personalization object
-            var personalization = new
-            {
-                to = new[] { new { email = to } },
-                dynamic_template_data = variables,
-                subject = subjectOverride // null thì JSON bỏ qua
-            };
-
-            var payload = new
-            {
-                personalizations = new[] { personalization },
-                from = new { email = _opt.FromEmail, name = _opt.FromName },
-                template_id = string.IsNullOrWhiteSpace(templateId) ? _opt.TemplateId : templateId,
-
-                categories = new[] { "transactional-otp" },
-                tracking_settings = new
-                {
-                    click_tracking = new { enable = false, enable_text = false },
-                    open_tracking = new { enable = false }
-                }
-            };
-
-            var opts = new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = null,
-                DictionaryKeyPolicy = null
-            };
-
-            using var content = JsonContent.Create(payload, options: opts);
-            using var resp = await _http.PostAsync(_uri, content, ct);
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                var body = await resp.Content.ReadAsStringAsync(ct);
-                throw new InvalidOperationException(
-                    $"❌ SendGrid error {(int)resp.StatusCode}: {body}"
-                );
-            }
-        }
+            CancellationToken ct = default)
+            => SendTemplateCoreAsync(to, templateId, variables, ct, subjectOverride: null);
 
         public async Task<bool> SendTemplateEmailAsync(
             string to,
@@ -85,19 +52,111 @@ namespace HAShop.Api.Services
         {
             try
             {
-                await SendTemplateAsync(
+                await SendTemplateCoreAsync(
                     to,
-                    _opt.TemplateId,
-                    new { NAME = name, OTP = otp, TTL_MIN = ttlMin, Sender_Name = "HAFood" },
-                    ct
-                );
+                    templateId: "otp",
+                    variables: new
+                    {
+                        NAME = name,
+                        OTP = otp,
+                        TTL_MIN = ttlMin,
+                        Sender_Name = _smtp.FromName
+                    },
+                    ct,
+                    subjectOverride: null);
+
                 return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SendGridSender] ❌ Error: {ex.Message}");
+                _log.LogError(ex, "[SMTP] SendTemplateEmailAsync failed for {Email}", to);
                 return false;
             }
+        }
+
+        // ===== Core SMTP send =====
+
+        private async Task SendTemplateCoreAsync(
+            string to,
+            string templateId,
+            object variables,
+            CancellationToken ct,
+            string? subjectOverride)
+        {
+            if (string.IsNullOrWhiteSpace(to))
+                throw new ArgumentException("Recipient email is required", nameof(to));
+
+            // Đọc variables (NAME, OTP, TTL_MIN, Sender_Name)
+            JsonElement root;
+            if (variables is JsonElement el)
+                root = el;
+            else
+                root = JsonSerializer.SerializeToElement(variables);
+
+            string name = TryGetString(root, "NAME") ?? "bạn";
+            string otp = TryGetString(root, "OTP") ?? "";
+            string ttlMinStr = TryGetString(root, "TTL_MIN") ?? "15";
+            string senderName = TryGetString(root, "Sender_Name") ?? _smtp.FromName;
+
+            if (string.IsNullOrEmpty(otp))
+            {
+                _log.LogWarning("SMTP email sent without OTP value. templateId={TemplateId}", templateId);
+            }
+
+            var subject = subjectOverride ?? $"[{senderName}] Mã xác thực OTP của bạn: {otp}";
+
+            var bodyBuilder = new StringBuilder();
+            bodyBuilder.AppendLine("<!DOCTYPE html>");
+            bodyBuilder.AppendLine("<html><body style=\"font-family:Segoe UI,Arial,sans-serif;font-size:14px;\">");
+            bodyBuilder.AppendLine($"<p>Chào {WebUtility.HtmlEncode(name)},</p>");
+            bodyBuilder.AppendLine("<p>Mã xác thực (OTP) của bạn là:</p>");
+            bodyBuilder.AppendLine($"<p style=\"font-size:20px;font-weight:bold;letter-spacing:3px;\">{WebUtility.HtmlEncode(otp)}</p>");
+            bodyBuilder.AppendLine($"<p>Mã có hiệu lực trong khoảng {WebUtility.HtmlEncode(ttlMinStr)} phút.</p>");
+            bodyBuilder.AppendLine("<p>Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email.</p>");
+            bodyBuilder.AppendLine($"<p>Trân trọng,<br/>{WebUtility.HtmlEncode(senderName)}</p>");
+            bodyBuilder.AppendLine("</body></html>");
+
+            using var message = new MailMessage
+            {
+                From = new MailAddress(_smtp.FromEmail, _smtp.FromName, Encoding.UTF8),
+                Subject = subject,
+                Body = bodyBuilder.ToString(),
+                IsBodyHtml = true
+            };
+
+            message.To.Add(new MailAddress(to));
+
+            using var client = new SmtpClient(_smtp.Host, _smtp.Port)
+            {
+                EnableSsl = _smtp.EnableSsl,
+                Credentials = new NetworkCredential(_smtp.User, _smtp.Password)
+            };
+
+            try
+            {
+                await client.SendMailAsync(message, ct);
+                _log.LogInformation("[SMTP] Email sent to {Email}", to);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "[SMTP] Error sending email to {Email}", to);
+                throw; // để Worker bắt & ghi vào last_error
+            }
+        }
+
+        private static string? TryGetString(JsonElement root, string propName)
+        {
+            if (root.ValueKind == JsonValueKind.Object &&
+                root.TryGetProperty(propName, out var child))
+            {
+                return child.ValueKind switch
+                {
+                    JsonValueKind.String => child.GetString(),
+                    JsonValueKind.Number => child.ToString(),
+                    _ => child.ToString()
+                };
+            }
+            return null;
         }
     }
 }

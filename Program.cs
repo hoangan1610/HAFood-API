@@ -249,24 +249,24 @@ builder.Services.AddSingleton<IZaloPayGateway, ZaloPayService>();
 builder.Services.Configure<PaymentsFlags>(builder.Configuration.GetSection("Payments"));
 builder.Services.Configure<FrontendOptions>(builder.Configuration.GetSection("Frontend"));
 
-// SendGrid options
+// SMTP options (đọc từ section "Smtp")
+builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection("Smtp"));
+
+// EmailQueue options (giữ tên SendGridOptions cho đỡ sửa Worker)
 builder.Services.Configure<SendGridOptions>(opt =>
 {
-    opt.ApiKey = Environment.GetEnvironmentVariable("SENDGRID_API_KEY") ?? "";
-    opt.FromEmail = builder.Configuration["SendGrid:FromEmail"] ?? "";
-    opt.FromName = builder.Configuration["SendGrid:FromName"] ?? "";
-    opt.TemplateId = builder.Configuration["SendGrid:TemplateId"] ?? "";
-
     if (int.TryParse(builder.Configuration["SendGrid:BatchSize"], out var batch))
         opt.BatchSize = batch;
+
     if (int.TryParse(builder.Configuration["SendGrid:PollIntervalSeconds"], out var poll))
         opt.PollIntervalSeconds = poll;
 });
 
-// SendGrid services
+// Queue + Sender
 builder.Services.AddSingleton<IEmailQueueRepository, EmailQueueRepository>();
-builder.Services.AddSingleton<ISendGridSender, SendGridSender>();
+builder.Services.AddSingleton<ISendGridSender, SendGridSender>(); // giờ là SMTP sender
 builder.Services.AddHostedService<EmailQueueWorker>();
+
 
 // ---------------------------------------------------------
 // [J] CHAT (Hybrid Router + Tools)
@@ -415,27 +415,50 @@ app.MapGet("/test-email", async (ISendGridSender mailer) =>
         "123456",
         10
     );
-    return ok ? Results.Ok("✅ Email đã gửi thành công!") : Results.BadRequest("❌ Gửi email thất bại!");
-}).WithDescription("Gửi email test qua SendGrid (Dynamic Template)");
+    return ok
+        ? Results.Ok("✅ Email đã gửi thành công (SMTP)!")
+        : Results.BadRequest("❌ Gửi email thất bại!");
+}).WithDescription("Gửi email test OTP qua SMTP");
 
-app.MapGet("/test-email-verbose", async (ISendGridSender mailer, IOptions<SendGridOptions> opt, HttpRequest req, CancellationToken ct) =>
+
+app.MapGet("/test-email-verbose", async (
+    ISendGridSender mailer,
+    HttpRequest req,
+    CancellationToken ct) =>
 {
     var to = req.Query["to"].FirstOrDefault() ?? "your-test-email@example.com";
+
     try
     {
         await mailer.SendTemplateAsync(
             to,
-            opt.Value.TemplateId,
-            new { NAME = "Test User", OTP = "123456", TTL_MIN = 10, Sender_Name = "HAFood" },
+            templateId: "otp", // tên tượng trưng, SMTP không dùng template thật
+            variables: new
+            {
+                NAME = "Test User",
+                OTP = "123456",
+                TTL_MIN = 10,
+                Sender_Name = "HAFood"
+            },
             ct
         );
-        return Results.Ok(new { ok = true, note = "SendGrid accepted (202). Check inbox." });
+
+        return Results.Ok(new
+        {
+            ok = true,
+            note = "SMTP accepted. Kiểm tra inbox / spam."
+        });
     }
     catch (Exception ex)
     {
-        return Results.BadRequest(new { ok = false, error = ex.Message });
+        return Results.BadRequest(new
+        {
+            ok = false,
+            error = ex.Message
+        });
     }
 });
+
 
 // Redirect root → Swagger
 app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
