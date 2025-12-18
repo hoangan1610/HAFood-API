@@ -33,15 +33,16 @@ public class VnPayService
             ? nowVN.AddMinutes(_opt.ExpireMinutes.Value).ToString("yyyyMMddHHmmss")
             : null;
 
+        // ====== IMPORTANT: KHÔNG gửi vnp_IpnUrl trong URL thanh toán ======
         var data = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
             ["vnp_Version"] = "2.1.0",
             ["vnp_Command"] = "pay",
             ["vnp_TmnCode"] = _opt.TmnCode,
-            ["vnp_Amount"] = (amountVnd * 100).ToString(), // *100
+            ["vnp_Amount"] = (amountVnd * 100).ToString(), // VND * 100
             ["vnp_CurrCode"] = "VND",
-            ["vnp_TxnRef"] = orderCode,
-            ["vnp_OrderInfo"] = orderInfo ?? $"Thanh toan don {orderCode}",
+            ["vnp_TxnRef"] = orderCode, // nhớ: không trùng trong ngày khi test nhiều lần
+            ["vnp_OrderInfo"] = orderInfo ?? $"Thanh toan don {orderCode}", // KHÔNG dấu, KHÔNG ký tự đặc biệt
             ["vnp_OrderType"] = "other",
             ["vnp_Locale"] = "vn",
             ["vnp_IpAddr"] = string.IsNullOrWhiteSpace(clientIp) ? "127.0.0.1" : clientIp,
@@ -49,17 +50,14 @@ public class VnPayService
             ["vnp_ReturnUrl"] = _opt.ReturnUrl
         };
 
-        if (!string.IsNullOrWhiteSpace(_opt.IpnUrl))
-            data["vnp_IpnUrl"] = _opt.IpnUrl!;
         if (!string.IsNullOrEmpty(expire))
             data["vnp_ExpireDate"] = expire;
 
-        // CHẾ ĐỘ ENCODE theo option:
-        // CompatEncodeWithPlus=true  -> khoảng trắng thành '+'
-        // CompatEncodeWithPlus=false -> khoảng trắng thành '%20'
+        // Encode giống VNPAY: space -> '+'
         var unsigned = _opt.CompatEncodeWithPlus ? BuildQueryPlus(data) : BuildQueryStrict(data);
 
-        // CHỮ KÝ theo option
+        // Ký HMACSHA512
+        // (khuyến nghị gửi uppercase cho chắc ăn)
         var sign = _opt.LowercaseHash
             ? HmacSHA512HexLower(_opt.HashSecret, unsigned)
             : HmacSHA512HexUpper(_opt.HashSecret, unsigned);
@@ -70,30 +68,36 @@ public class VnPayService
         var sb = new StringBuilder();
         sb.Append(_opt.PayUrl);
         sb.Append('?').Append(unsigned);
+
         // TUYỆT ĐỐI không gửi vnp_SecureHashType (sandbox hay báo 70)
-        if (_opt.AppendSecureHashType) { /* giữ false: không append */ }
+        // => luôn giữ false
         sb.Append("&vnp_SecureHash=").Append(sign);
 
         var url = sb.ToString();
         _log.LogInformation("VNPAY url:      {url}", url);
-        _log.LogInformation("VNPAY mode: return={ret}, ipn={ipn}", _opt.ReturnUrl, _opt.IpnUrl ?? "(null)");
+        _log.LogInformation("VNPAY mode: return={ret}, ipn-config={ipn}",
+            _opt.ReturnUrl,
+            _opt.IpnUrl ?? "(null - configure in VNPAY portal)");
+
         return url;
     }
 
     public bool ValidateSignature(IQueryCollection qs)
     {
         var fields = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
         foreach (var kv in qs)
         {
             var k = kv.Key;
             if (!k.StartsWith("vnp_", StringComparison.Ordinal)) continue;
             if (k.Equals("vnp_SecureHash", StringComparison.OrdinalIgnoreCase)) continue;
             if (k.Equals("vnp_SecureHashType", StringComparison.OrdinalIgnoreCase)) continue;
+
             var v = kv.Value.ToString();
             if (!string.IsNullOrEmpty(v)) fields[k] = v;
         }
 
-        // Phải build lại CHÍNH XÁC cùng chế độ encode như khi tạo URL
+        // Build lại đúng chế độ encode như lúc tạo URL
         var unsigned = _opt.CompatEncodeWithPlus ? BuildQueryPlus(fields) : BuildQueryStrict(fields);
 
         var computedUpper = HmacSHA512HexUpper(_opt.HashSecret, unsigned);
@@ -104,8 +108,12 @@ public class VnPayService
               || received.Equals(computedLower, StringComparison.OrdinalIgnoreCase);
 
         if (!ok)
-            _log.LogWarning("ValidateSignature FAIL. unsigned={unsigned} computedUpper={upper} received={recv}",
-                unsigned, computedUpper, received);
+        {
+            _log.LogWarning(
+                "ValidateSignature FAIL. unsigned={unsigned} computedUpper={upper} received={recv}",
+                unsigned, computedUpper, received
+            );
+        }
 
         return ok;
     }
@@ -126,11 +134,8 @@ public class VnPayService
 
     private static string BuildQueryPlus(SortedDictionary<string, string> dict)
     {
-        static string Enc(string s)
-        {
-            // encode chuẩn rồi đổi %20 -> +
-            return Uri.EscapeDataString(s).Replace("%20", "+");
-        }
+        static string Enc(string s) => Uri.EscapeDataString(s).Replace("%20", "+");
+
         var sb = new StringBuilder();
         foreach (var kv in dict)
         {
@@ -149,6 +154,7 @@ public class VnPayService
         foreach (var b in hash) sb.Append(b.ToString("X2"));
         return sb.ToString();
     }
+
     private static string HmacSHA512HexLower(string key, string data)
     {
         using var h = new HMACSHA512(Encoding.UTF8.GetBytes(key));

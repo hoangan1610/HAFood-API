@@ -200,18 +200,26 @@ namespace HAShop.Api.Services
             }
 
             // 🔔 Thông báo ADMIN: có đơn mới (Telegram)
+            // 🔔 Thông báo ADMIN:
+            // - COD: notify ngay
+            // - Online (ZaloPay/Pay2S): notify sau khi IPN xác nhận PAID (tránh báo đơn "chưa thanh toán")
+            // 🔔 Thông báo ADMIN: chỉ gửi ngay với COD
             try
             {
-                await _adminOrderNotifier.NotifyNewOrderAsync(
-                    orderId,
-                    code,
-                    payTotal,
-                    req.Ship_Name,
-                    req.Ship_Phone,
-                    shipAddressShort,
-                    paymentMethod,
-                    placedAt,
-                    ct);
+                var pm = paymentMethod ?? req.Payment_Method; // fallback
+                if (pm == 0) // COD
+                {
+                    await _adminOrderNotifier.NotifyNewOrderAsync(
+                        orderId,
+                        code,
+                        payTotal,
+                        req.Ship_Name ?? "",
+                        req.Ship_Phone ?? "",
+                        shipAddressShort,
+                        pm,
+                        placedAt,
+                        ct);
+                }
             }
             catch (Exception ex)
             {
@@ -219,6 +227,8 @@ namespace HAShop.Api.Services
                     "Notify admin new order failed. OrderId={OrderId}, Code={OrderCode}",
                     orderId, code);
             }
+
+
 
             return new PlaceOrderResponse(orderId, code);
 
@@ -485,13 +495,14 @@ namespace HAShop.Api.Services
         }
 
         public async Task<SwitchPaymentResponse> SwitchPaymentAsync(
-            string orderCode,
-            byte newMethod,
-            string? reason,
-            CancellationToken ct)
+     string orderCode,
+     byte newMethod,
+     string? reason,
+     CancellationToken ct)
         {
             using var con = _db.Create();
 
+            // Open connection (DbConnection safe)
             if (con is DbConnection dbc) await dbc.OpenAsync(ct);
             else con.Open();
 
@@ -516,7 +527,7 @@ namespace HAShop.Api.Services
                 static string MapProvider(byte? m) => m switch
                 {
                     1 => "ZALOPAY",
-                    2 => "VNPAY",
+                    2 => "PAY2S",   // slot cũ VNPAY
                     0 => "COD",
                     _ => "UNKNOWN"
                 };
@@ -525,17 +536,18 @@ namespace HAShop.Api.Services
                     ? MapProvider(o.Payment_Method)
                     : o.Payment_Provider;
 
+                // Log “user switched payment” (status=0)
                 if (!string.IsNullOrWhiteSpace(oldProvider) || (o.Payment_Method ?? 0) != newMethod)
                 {
                     await con.ExecuteAsync(new CommandDefinition(
                         """
-                        INSERT dbo.tbl_payment_transaction
-                            (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
-                             paid_at, error_code, error_message, created_at, updated_at)
-                        VALUES
-                            (@oid, @prov, COALESCE(@m,0), 0, @amt, 'VND', @txid, @oref,
-                             NULL, @err, @msg, SYSDATETIME(), SYSDATETIME())
-                        """,
+                INSERT dbo.tbl_payment_transaction
+                    (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                     paid_at, error_code, error_message, created_at, updated_at)
+                VALUES
+                    (@oid, @prov, COALESCE(@m,0), 0, @amt, 'VND', @txid, @oref,
+                     NULL, @err, @msg, SYSDATETIME(), SYSDATETIME())
+                """,
                         new
                         {
                             oid = o.Id,
@@ -558,14 +570,14 @@ namespace HAShop.Api.Services
 
                 await con.ExecuteAsync(new CommandDefinition(
                     """
-                    UPDATE dbo.tbl_orders
-                    SET payment_method = @pm,
-                        payment_provider = @prov,
-                        payment_status = @stt,
-                        payment_ref = NULL,
-                        updated_at = SYSDATETIME()
-                    WHERE order_code = @code
-                    """,
+            UPDATE dbo.tbl_orders
+            SET payment_method = @pm,
+                payment_provider = @prov,
+                payment_status = @stt,
+                payment_ref = NULL,
+                updated_at = SYSDATETIME()
+            WHERE order_code = @code
+            """,
                     new
                     {
                         code = orderCode,
@@ -579,6 +591,7 @@ namespace HAShop.Api.Services
                 ));
 
                 tx.Commit();
+
                 return new SwitchPaymentResponse
                 {
                     Order_Code = orderCode,
@@ -592,5 +605,6 @@ namespace HAShop.Api.Services
                 throw;
             }
         }
+
     }
-}
+    }

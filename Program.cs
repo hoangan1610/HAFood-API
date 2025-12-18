@@ -25,6 +25,8 @@ using System.Data;
 using System.Text;
 using HAShop.Api.Sockets;
 using HAShop.Api.Realtime;
+using HAShop.Api.Workers;
+
 // ...
 
 
@@ -38,6 +40,7 @@ var builder = WebApplication.CreateBuilder(args);
 // [A] ENV & CONFIG
 // ---------------------------------------------------------
 Env.Load(); // Load biến môi trường từ .env (nếu có)
+builder.Configuration.AddEnvironmentVariables();
 
 // ---------------------------------------------------------
 // [B] HTTP CLIENTS (OpenAI-compatible local LLM, SendGrid)
@@ -326,7 +329,16 @@ builder.Services.AddScoped<IShippingService, ShippingService>();
 builder.Services.AddScoped<IReviewService, ReviewService>();
 builder.Services.AddScoped<ILoyaltyService, LoyaltyService>();
 builder.Services.AddScoped<IMissionService, MissionService>();
+// Moderation/AI duyệt review (simple rule-based)
+builder.Services.AddSingleton<IReviewModerationService, SimpleReviewModerationService>();
 
+builder.Services.AddScoped<IArticlePublicService, ArticlePublicService>();
+
+builder.Services.AddHostedService<ScheduledArticlePublisherWorker>();
+builder.Services.AddScoped<IArticleMetricsService, ArticleMetricsService>();
+
+builder.Services.Configure<Pay2SOptions>(builder.Configuration.GetSection("Pay2S"));
+builder.Services.AddHttpClient<Pay2SService>();
 
 
 builder.Services.AddSingleton<FlashSaleBroadcaster>(); // concrete
@@ -376,8 +388,12 @@ app.UseExceptionHandler(errApp =>
 // ---------------------------------------------------------
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
-    ForwardedHeaders = ForwardedHeaders.XForwardedHost | ForwardedHeaders.XForwardedProto
+    ForwardedHeaders =
+        ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedHost |
+        ForwardedHeaders.XForwardedProto
 });
+
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();

@@ -20,6 +20,9 @@ namespace HAShop.Api.Services
         private readonly string _adminChatId;
         private readonly string? _orderUrlTemplate;
 
+        private const int TELEGRAM_SAFE_MAX = 3900;
+        private static readonly CultureInfo VnCulture = new("vi-VN");
+
         public TelegramAdminOrderNotifier(
             HttpClient httpClient,
             IConfiguration configuration,
@@ -48,29 +51,29 @@ namespace HAShop.Api.Services
             DateTime? placedAt,
             CancellationToken ct)
         {
-            var vn = new CultureInfo("vi-VN");
-            var totalStr = payTotal.ToString("#,0", vn);
+            var totalStr = payTotal.ToString("#,0", VnCulture);
 
             string? orderUrl = null;
             if (!string.IsNullOrWhiteSpace(_orderUrlTemplate))
             {
-                orderUrl = string.Format(_orderUrlTemplate, orderId);
+                try { orderUrl = string.Format(_orderUrlTemplate, orderId); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Invalid Telegram:OrderUrlTemplate format."); }
             }
 
             string paymentText = paymentMethod switch
             {
                 0 => "COD",
                 1 => "ZaloPay",
-                2 => "VNPAY",
+                2 => "Pay2S",
                 _ => "Khác"
             };
 
-            string timeText = placedAt?.ToLocalTime().ToString("HH:mm dd/MM/yyyy", vn) ?? "N/A";
+            string timeText = placedAt.HasValue ? ToVietnamTimeText(placedAt.Value) : "N/A";
 
-            string H(string? s) => WebUtility.HtmlEncode(s ?? string.Empty);
+            static string H(string? s) => WebUtility.HtmlEncode(s ?? string.Empty);
 
             var sb = new StringBuilder();
-            sb.AppendLine("🛒 <b>ĐƠN HÀNG MỚI</b>");
+            sb.AppendLine("🛒 <b>ĐƠN HÀNG</b>");
             sb.AppendLine($"• Mã đơn: <b>#{H(orderCode)}</b>");
             sb.AppendLine($"• Khách: {H(shipName)}");
             sb.AppendLine($"• SĐT: <code>{H(shipPhone)}</code>");
@@ -79,54 +82,72 @@ namespace HAShop.Api.Services
             sb.AppendLine($"• Thời gian: {H(timeText)}");
 
             if (!string.IsNullOrWhiteSpace(shipAddressShort))
-            {
                 sb.AppendLine($"• Địa chỉ: {H(shipAddressShort)}");
-            }
 
             if (!string.IsNullOrWhiteSpace(orderUrl))
             {
                 sb.AppendLine();
-                // Không HtmlEncode toàn bộ href, tránh phá http://
-                var safeUrl = orderUrl; // vì mình tự control template nên ok
+                // ✅ encode attribute để tránh lỗi HTML parse khi url có & ? =
+                var safeUrl = WebUtility.HtmlEncode(orderUrl);
                 sb.AppendLine($@"<a href=""{safeUrl}"">🔗 Xem chi tiết</a>");
             }
 
             var text = sb.ToString();
+            if (text.Length > TELEGRAM_SAFE_MAX) text = text.Substring(0, TELEGRAM_SAFE_MAX) + "…";
 
             var payload = new
             {
                 chat_id = _adminChatId,
                 text,
-                parse_mode = "HTML"
+                parse_mode = "HTML",
+                disable_web_page_preview = true
             };
 
             var url = $"https://api.telegram.org/bot{_botToken}/sendMessage";
 
-            var options = new JsonSerializerOptions
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            };
-            var json = JsonSerializer.Serialize(payload, options);
+            });
 
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
             try
             {
                 using var resp = await _httpClient.PostAsync(url, content, ct);
-
                 if (!resp.IsSuccessStatusCode)
                 {
                     var body = await resp.Content.ReadAsStringAsync(ct);
-                    _logger.LogWarning(
-                        "Telegram sendMessage failed. Status={StatusCode}, Body={Body}",
+                    _logger.LogWarning("Telegram sendMessage failed. Status={StatusCode}, Body={Body}",
                         resp.StatusCode, body);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "NotifyNewOrderAsync (Telegram) failed for order {OrderId}", orderId);
+                _logger.LogError(ex, "NotifyNewOrderAsync (Telegram) failed for order {OrderId}", orderId);
             }
+        }
+
+        private static string ToVietnamTimeText(DateTime dt)
+        {
+            // datetime2 từ SQL thường Kind=Unspecified; theo design của bạn lưu UTC => ép UTC
+            var utc = dt.Kind switch
+            {
+                DateTimeKind.Utc => dt,
+                DateTimeKind.Local => dt.ToUniversalTime(),
+                _ => DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+            };
+
+            var vn = GetVietnamTimeZone();
+            var vnTime = TimeZoneInfo.ConvertTimeFromUtc(utc, vn);
+            return vnTime.ToString("HH:mm dd/MM/yyyy", VnCulture);
+        }
+
+        private static TimeZoneInfo GetVietnamTimeZone()
+        {
+            try { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh"); } catch { }
+            try { return TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"); } catch { }
+            return TimeZoneInfo.Local;
         }
     }
 }
