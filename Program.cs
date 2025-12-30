@@ -26,6 +26,7 @@ using System.Text;
 using HAShop.Api.Sockets;
 using HAShop.Api.Realtime;
 using HAShop.Api.Workers;
+using HAShop.Api.Workers.ReviewModeration;
 
 // ...
 
@@ -105,22 +106,30 @@ builder.Services.AddCors(options =>
                 "https://localhost:44336",
                 "http://localhost:44336",
                 "http://localhost:3000",
-                // CMS local
+
+                // ✅ CMS local (bổ sung đúng port bạn đang chạy)
+                "https://localhost:7056",
+                "http://localhost:7056",
+                "https://127.0.0.1:7056",
+                "http://127.0.0.1:7056",
+
+                // (nếu bạn vẫn chạy cms port 51572 thì giữ)
                 "http://localhost:51572",
                 "http://127.0.0.1:51572",
+
                 // Prod
                 "https://cms.hafood.id.vn",
                 "https://hafood.id.vn",
                 "https://www.hafood.id.vn",
-                // Mock (nếu dùng)
                 "https://hafood-mock-api.onrender.com"
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
-            .AllowCredentials()                 // nếu dùng cookie auth
+            .AllowCredentials()
             .SetPreflightMaxAge(TimeSpan.FromDays(1))
     );
 });
+
 
 // ---------------------------------------------------------
 // [F] SWAGGER + JWT SecurityScheme
@@ -350,6 +359,9 @@ builder.Services.AddHostedService(sp =>
 // Sau builder.Services.AddControllers(); ... các service khác
 builder.Services.AddHttpClient<IAdminOrderNotifier, TelegramAdminOrderNotifier>();
 
+builder.Services.AddSingleton<IReviewModerationQueue, ReviewModerationQueue>();
+builder.Services.AddScoped<IReviewModerationRunner, ReviewModerationRunner>();
+builder.Services.AddHostedService<ReviewModerationWorker>();
 
 // ---------------------------------------------------------
 // [L] MIDDLEWARE TUỲ BIẾN (ProblemDetails writer & middleware)
@@ -388,10 +400,9 @@ app.UseExceptionHandler(errApp =>
 // ---------------------------------------------------------
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
-    ForwardedHeaders =
-        ForwardedHeaders.XForwardedFor |
-        ForwardedHeaders.XForwardedHost |
-        ForwardedHeaders.XForwardedProto
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedHost | ForwardedHeaders.XForwardedProto,
+    KnownNetworks = { },
+    KnownProxies = { }
 });
 
 
@@ -411,6 +422,7 @@ app.UseSwaggerUI(c =>
 // ---------------------------------------------------------
 // [P] CORS + AUTHN/AUTHZ + CUSTOM MIDDLEWARE
 // ---------------------------------------------------------
+app.UseRouting();
 app.UseCors("AppCors");                       // ✅ chỉ 1 policy
 app.UseAuthentication();
 app.UseAuthorization();

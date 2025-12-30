@@ -130,18 +130,21 @@ namespace HAShop.Api.Services
 
         private static string ToVietnamTimeText(DateTime dt)
         {
-            // datetime2 từ SQL thường Kind=Unspecified; theo design của bạn lưu UTC => ép UTC
-            var utc = dt.Kind switch
-            {
-                DateTimeKind.Utc => dt,
-                DateTimeKind.Local => dt.ToUniversalTime(),
-                _ => DateTime.SpecifyKind(dt, DateTimeKind.Utc)
-            };
-
             var vn = GetVietnamTimeZone();
+
+            // ✅ datetime2 từ SQL thường Kind=Unspecified
+            // Nếu DB đang lưu GIỜ VN (GETDATE()/DateTime.Now) thì coi Unspecified là VN local
+            if (dt.Kind == DateTimeKind.Unspecified)
+            {
+                return dt.ToString("HH:mm dd/MM/yyyy", VnCulture);
+            }
+
+            // Còn lại: nếu Utc/Local thì convert về VN
+            var utc = dt.Kind == DateTimeKind.Utc ? dt : dt.ToUniversalTime();
             var vnTime = TimeZoneInfo.ConvertTimeFromUtc(utc, vn);
             return vnTime.ToString("HH:mm dd/MM/yyyy", VnCulture);
         }
+
 
         private static TimeZoneInfo GetVietnamTimeZone()
         {

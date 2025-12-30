@@ -6,8 +6,9 @@ using HAShop.Api.DTOs;
 using HAShop.Api.Utils;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
-using System.Text.Json;
 
+// ✅ add using queue
+using HAShop.Api.Workers.ReviewModeration;
 
 namespace HAShop.Api.Services
 {
@@ -62,10 +63,14 @@ namespace HAShop.Api.Services
         private readonly ILogger<ReviewService> _logger;
         private readonly INotificationService _notifications;
         private readonly IMissionService _missions;
-        private readonly IReviewModerationService _moderation;   // ✅ AI / rule duyệt review
+
+        // (giữ lại interface moderation nếu bạn còn dùng ở nơi khác)
+        private readonly IReviewModerationService _moderation;
+
+        // ✅ NEW: queue để chạy moderation nền
+        private readonly IReviewModerationQueue _moderationQueue;
 
         // Id "admin hệ thống" dùng cho auto duyệt
-        // Bạn có thể đổi sang id thật của 1 admin trong DB
         private const long SystemAutoAdminUserId = 0;
 
         public ReviewService(
@@ -73,21 +78,23 @@ namespace HAShop.Api.Services
             ILogger<ReviewService> logger,
             INotificationService notifications,
             IMissionService missions,
-            IReviewModerationService moderation)
+            IReviewModerationService moderation,
+            IReviewModerationQueue moderationQueue)
         {
             _dbFactory = dbFactory;
             _logger = logger;
             _notifications = notifications;
             _missions = missions;
             _moderation = moderation;
+            _moderationQueue = moderationQueue;
         }
 
-        // =========== CREATE ===========
+        // =========== CREATE (NON-BLOCKING) ===========
 
         public async Task<ProductReviewCreateResponse> CreateAsync(
-      long userId,
-      ProductReviewCreateRequest req,
-      CancellationToken ct = default)
+            long userId,
+            ProductReviewCreateRequest req,
+            CancellationToken ct = default)
         {
             if (req == null)
                 throw new AppException("VALIDATION_FAILED", "Dữ liệu không hợp lệ.");
@@ -124,7 +131,7 @@ namespace HAShop.Api.Services
 
             try
             {
-                // 1) Tạo review
+                // 1) Tạo review (⚠️ SP phải tạo status=0 (PENDING) để đúng yêu cầu)
                 await con.ExecuteAsync(new CommandDefinition(
                     "dbo.usp_product_review_create",
                     p,
@@ -136,7 +143,7 @@ namespace HAShop.Api.Services
                 var id = p.Get<long>("@review_id");
                 var verified = p.Get<bool?>("@is_verified_purchase");
 
-                // 2) Gọi mission sau khi tạo review thành công (giữ nguyên logic cũ)
+                // 2) Mission giữ nguyên (nhanh). Nếu mission nặng thì cũng có thể queue tương tự.
                 try
                 {
                     await _missions.CheckReviewMissionsAsync(
@@ -152,115 +159,33 @@ namespace HAShop.Api.Services
                     _logger.LogError(ex,
                         "CheckReviewMissionsAsync failed. ReviewId={ReviewId}, UserId={UserId}",
                         id, userId);
-                    // Không throw để không làm fail API review
                 }
 
-                // 3) Gọi AI / rule để auto duyệt / reject / pending
-                try
-                {
-                    var mod = await _moderation.ModerateAsync(
-                        productId: req.Product_Id,
-                        userId: userId,
-                        rating: req.Rating,
-                        title: req.Title,
-                        content: req.Content,
-                        hasImage: req.Has_Image,
-                        ct: ct);
-
-                    // --- Lưu info AI vào 3 cột mới ---
-                    byte? aiSource = 1; // 1 = rule/local AI (sau này nếu tách LLM riêng có thể gán 2)
-                    string? aiReason = mod?.Reason;
-                    string? aiFlagsJson = (mod?.Flags != null && mod.Flags.Length > 0)
-                        ? JsonSerializer.Serialize(mod.Flags)
-                        : null;
-
-                    const string sqlUpdateAi = @"
-UPDATE dbo.tbl_product_review
-SET 
-    ai_decision_source = @ai_source,
-    ai_reason          = @ai_reason,
-    ai_flags_json      = @ai_flags,
-    updated_at         = SYSUTCDATETIME()
-WHERE id = @id;";
-
-                    await con.ExecuteAsync(new CommandDefinition(
-                        sqlUpdateAi,
-                        new
-                        {
-                            id,
-                            ai_source = (object?)aiSource ?? DBNull.Value,
-                            ai_reason = (object?)aiReason ?? DBNull.Value,
-                            ai_flags = (object?)aiFlagsJson ?? DBNull.Value
-                        },
-                        cancellationToken: ct));
-
-                    // --- Điều chỉnh status bằng API SetStatusAsync ---
-                    if (mod.IsRejected)
-                    {
-                        await SetStatusAsync(
-                            adminUserId: SystemAutoAdminUserId,
-                            reviewId: id,
-                            newStatus: 2, // REJECTED
-                            rejectedReason: mod.Reason ?? "AUTO_REJECTED_BY_SYSTEM",
-                            ct: ct);
-
-                        _logger.LogInformation(
-                            "Review {ReviewId} auto REJECTED by moderation. Reason={Reason}, Flags={Flags}",
-                            id, mod.Reason, string.Join(',', mod.Flags));
-                    }
-                    else if (mod.IsApproved)
-                    {
-                        await SetStatusAsync(
-                            adminUserId: SystemAutoAdminUserId,
-                            reviewId: id,
-                            newStatus: 1, // APPROVED
-                            rejectedReason: string.Empty,
-                            ct: ct);
-
-                        _logger.LogInformation(
-                            "Review {ReviewId} auto APPROVED by moderation. Reason={Reason}, Flags={Flags}",
-                            id, mod.Reason, string.Join(',', mod.Flags));
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Review {ReviewId} requires manual review. Reason={Reason}, Flags={Flags}",
-                            id, mod.Reason, string.Join(',', mod.Flags));
-                        // status = 0 (PENDING) giữ nguyên
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // Nếu AI/moderation lỗi → không làm fail API review, chỉ log
-                    _logger.LogError(ex,
-                        "Moderation failed for review {ReviewId}. Keeping PENDING.",
-                        id);
-                }
+                // ✅ 3) Enqueue moderation chạy nền (KHÔNG block request)
+                _moderationQueue.Enqueue(id);
 
                 return new ProductReviewCreateResponse
                 {
                     Success = true,
                     Code = null,
-                    Message = "Đã gửi đánh giá.",
+                    Message = "Đã gửi đánh giá. Hệ thống đang kiểm duyệt.",
                     Review_Id = id,
                     Is_Verified_Purchase = verified
                 };
             }
-            // mapping lỗi nghiệp vụ từ SP
-            catch (SqlException ex) when (ex.Number == 50501) // ORDER_NOT_FOUND hoặc ORDER_ITEM_NOT_FOUND
+            catch (SqlException ex) when (ex.Number == 50501)
             {
                 throw new AppException("ORDER_OR_ITEM_NOT_FOUND", ex.Message, ex);
             }
-            catch (SqlException ex) when (ex.Number == 50502) // REVIEW_DUPLICATE
+            catch (SqlException ex) when (ex.Number == 50502)
             {
                 throw new AppException("REVIEW_ALREADY_EXISTS", ex.Message, ex);
             }
-            catch (SqlException ex) when (ex.Number == 50503) // RATING_INVALID
+            catch (SqlException ex) when (ex.Number == 50503)
             {
                 throw new AppException("RATING_INVALID", ex.Message, ex);
             }
         }
-
 
         // =========== SET STATUS (ADMIN / SYSTEM) ===========
 
@@ -292,10 +217,9 @@ WHERE id = @id;";
                     commandTimeout: 30
                 ));
 
-                // Sau khi update thành công → gửi notify nếu cần
+                // notify khi approved
                 try
                 {
-                    // Lấy lại thông tin review
                     var row = await con.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
                         "SELECT user_info_id, product_id, rating, status FROM dbo.tbl_product_review WHERE id = @id",
                         new { id = reviewId },
@@ -307,22 +231,17 @@ WHERE id = @id;";
                         long productId = row.product_id;
                         byte status = row.status;
 
-                        // Chỉ notify khi đã duyệt (status = 1)
                         if (status == 1)
                         {
                             var title = "Đánh giá của bạn đã được duyệt";
                             var body = "Cảm ơn bạn đã chia sẻ đánh giá về sản phẩm. Đánh giá đã được duyệt và hiển thị công khai.";
 
-                            var dataObj = new
-                            {
-                                review_id = reviewId,
-                                product_id = productId
-                            };
+                            var dataObj = new { review_id = reviewId, product_id = productId };
                             var dataJson = System.Text.Json.JsonSerializer.Serialize(dataObj);
 
                             await _notifications.CreateInAppAsync(
                                 userId,
-                                NotificationTypes.REVIEW_REPLIED, // Nếu muốn có type riêng thì đổi ở đây
+                                NotificationTypes.REVIEW_REPLIED, // TODO: nên đổi sang REVIEW_APPROVED
                                 title,
                                 body,
                                 dataJson,
@@ -344,7 +263,7 @@ WHERE id = @id;";
                     Message = "Đã cập nhật trạng thái đánh giá."
                 };
             }
-            catch (SqlException ex) when (ex.Number == 50504) // REVIEW_NOT_FOUND
+            catch (SqlException ex) when (ex.Number == 50504)
             {
                 return new ProductReviewStatusUpdateResponse
                 {
@@ -353,7 +272,7 @@ WHERE id = @id;";
                     Message = ex.Message
                 };
             }
-            catch (SqlException ex) when (ex.Number == 50505) // REVIEW_ALREADY_APPROVED / INVALID_TRANSITION
+            catch (SqlException ex) when (ex.Number == 50505)
             {
                 return new ProductReviewStatusUpdateResponse
                 {
@@ -362,7 +281,7 @@ WHERE id = @id;";
                     Message = ex.Message
                 };
             }
-            catch (SqlException ex) when (ex.Number == 50506) // PERMISSION_DENIED (nếu anh có)
+            catch (SqlException ex) when (ex.Number == 50506)
             {
                 return new ProductReviewStatusUpdateResponse
                 {
@@ -396,7 +315,6 @@ WHERE id = @id;";
 
             var dto = await con.QueryFirstOrDefaultAsync<ProductReviewSummaryDto>(cmd);
 
-            // Nếu chưa có review, trả summary rỗng
             return dto ?? new ProductReviewSummaryDto
             {
                 Product_Id = productId,
@@ -427,8 +345,8 @@ WHERE id = @id;";
             p.Add("@variant_id", variantId, DbType.Int64);
             p.Add("@page", page, DbType.Int32);
             p.Add("@page_size", pageSize, DbType.Int32);
-            p.Add("@star_filter", starFilter, DbType.Byte);          // nullable
-            p.Add("@only_has_image", onlyHasImage, DbType.Boolean);  // nullable
+            p.Add("@star_filter", starFilter, DbType.Byte);
+            p.Add("@only_has_image", onlyHasImage, DbType.Boolean);
             p.Add("@total_count", dbType: DbType.Int32, direction: ParameterDirection.Output);
 
             var cmd = new CommandDefinition(
@@ -483,7 +401,6 @@ WHERE id = @id AND has_image = 0;";
 
             using (var tx = await ((DbConnection)con).BeginTransactionAsync(ct))
             {
-                // insert ảnh
                 await con.ExecuteAsync(new CommandDefinition(
                     sqlInsert,
                     rows,
@@ -491,7 +408,6 @@ WHERE id = @id AND has_image = 0;";
                     cancellationToken: ct
                 ));
 
-                // đảm bảo cờ has_image = 1
                 await con.ExecuteAsync(new CommandDefinition(
                     sqlUpdateFlag,
                     new { id = reviewId },
@@ -605,17 +521,11 @@ WHERE id = @id AND has_image = 0;";
                 var userId = p.Get<long>("@user_info_id");
                 var productId = p.Get<long>("@product_id");
 
-                // lấy lại reply để trả về UI
                 var reply = await GetReplyAsync(reviewId, ct);
 
-                // ==== Gửi thông báo cho khách ====
                 try
                 {
-                    var dataObj = new
-                    {
-                        review_id = reviewId,
-                        product_id = productId
-                    };
+                    var dataObj = new { review_id = reviewId, product_id = productId };
                     var dataJson = System.Text.Json.JsonSerializer.Serialize(dataObj);
 
                     var title = "Shop đã trả lời đánh giá của bạn";
@@ -641,7 +551,7 @@ WHERE id = @id AND has_image = 0;";
                     Message = "Đã lưu phản hồi."
                 };
             }
-            catch (SqlException ex) when (ex.Number == 50510) // REVIEW_NOT_FOUND
+            catch (SqlException ex) when (ex.Number == 50510)
             {
                 return new ProductReviewReplySaveResponse
                 {

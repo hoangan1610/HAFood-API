@@ -46,19 +46,27 @@ namespace HAShop.Api.Payments
         }
 
         public async Task<ZpCreateOrderResult> CreateOrderAsync(
-            string orderCode, long amountVnd, string description,
-            string? appUser, string? clientReturnUrl, CancellationToken ct)
+    string orderCode, long amountVnd, string description,
+    string? appUser, string? clientReturnUrl, CancellationToken ct)
         {
             // ❗️Mỗi lần tạo link phải có app_trans_id mới → tránh sub_return_code = -68 (Mã giao dịch bị trùng)
             var app_trans_id = NewAppTransId(orderCode);
             var app_time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+            // ✅ Redirect URL: CHỈ append code, KHÔNG append apptransid (ZaloPay tự gắn apptransid vào query)
             var baseRet = string.IsNullOrWhiteSpace(clientReturnUrl) ? _opt.ReturnUrl : clientReturnUrl;
-            var retWithQuery = baseRet.Contains('?')
-                ? $"{baseRet}&apptransid={Uri.EscapeDataString(app_trans_id)}&code={Uri.EscapeDataString(orderCode)}"
-                : $"{baseRet}?apptransid={Uri.EscapeDataString(app_trans_id)}&code={Uri.EscapeDataString(orderCode)}";
 
-            var embed = new { redirecturl = retWithQuery, merchantinfo = new { orderCode, app_trans_id } };
+            // Nếu baseRet chưa có query -> ?, có rồi -> &
+            var retWithQuery = baseRet.Contains('?')
+                ? $"{baseRet}&code={Uri.EscapeDataString(orderCode)}"
+                : $"{baseRet}?code={Uri.EscapeDataString(orderCode)}";
+
+            // embed_data: redirecturl + merchantinfo
+            var embed = new
+            {
+                redirecturl = retWithQuery,
+                merchantinfo = new { orderCode, app_trans_id }
+            };
             var embedJson = JsonSerializer.Serialize(embed);
             var itemJson = "[]";
 
@@ -116,6 +124,7 @@ namespace HAShop.Api.Payments
 
             return new ZpCreateOrderResult(orderUrl!, qrCode, token!, app_trans_id);
         }
+
 
         public bool ValidateIpn(IDictionary<string, string> fields, out string raw, out string computed)
         {
