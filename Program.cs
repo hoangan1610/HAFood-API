@@ -274,6 +274,15 @@ builder.Services.Configure<SendGridOptions>(opt =>
         opt.PollIntervalSeconds = poll;
 });
 
+
+// MoMo
+builder.Services.Configure<MomoOptions>(builder.Configuration.GetSection("MoMo"));
+
+builder.Services.AddHttpClient<MomoService>(c =>
+{
+    c.Timeout = TimeSpan.FromSeconds(30);
+});
+
 // Queue + Sender
 builder.Services.AddSingleton<IEmailQueueRepository, EmailQueueRepository>();
 builder.Services.AddSingleton<ISendGridSender, SendGridSender>(); // giờ là SMTP sender

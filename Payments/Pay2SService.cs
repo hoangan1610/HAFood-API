@@ -1,9 +1,13 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace HAShop.Api.Payments;
 
@@ -19,6 +23,7 @@ public class Pay2SService
         _log = log;
 
         var v = opt.Value;
+
         v.PartnerCode = (v.PartnerCode ?? "").Trim();
         v.AccessKey = (v.AccessKey ?? "").Trim();
         v.SecretKey = (v.SecretKey ?? "").Trim();
@@ -36,8 +41,10 @@ public class Pay2SService
         _opt = v;
     }
 
-    // Pay2S amount là VND (KHÔNG *100) :contentReference[oaicite:2]{index=2}
-    public async Task<string> CreatePaymentUrlAsync(string orderCode, long amountVnd, CancellationToken ct)
+    public sealed record CreateResult(string payUrl, string orderId, string requestId, long amount);
+
+    // Pay2S amount là VND (KHÔNG *100)
+    public async Task<CreateResult> CreatePaymentUrlAsync(string orderCode, long amountVnd, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(orderCode)) throw new ArgumentException("orderCode is empty");
         if (amountVnd <= 0) throw new ArgumentException("amountVnd must be > 0");
@@ -45,14 +52,13 @@ public class Pay2SService
         if (_opt.BankAccounts == null || _opt.BankAccounts.Count == 0)
             throw new InvalidOperationException("Pay2S.BankAccounts missing (need at least 1)");
 
-        var requestId = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        // ✅ FIX: unique requestId + unique orderId
+        var requestId = PaymentIdUtil.NewRequestId();
+        var orderId = PaymentIdUtil.NewProviderOrderId(orderCode);
 
-        var orderId = orderCode;
-
-        // orderInfo: 10-32 ký tự, chỉ chữ + số, không ký tự đặc biệt :contentReference[oaicite:3]{index=3}
+        // orderInfo: 10-32 ký tự, chỉ chữ + số
         var orderInfo = BuildOrderInfo(orderCode);
 
-        // rawHash theo docs create: accessKey=...&amount=...&bankAccounts=Array&ipnUrl=...&orderId=...&orderInfo=...&partnerCode=...&redirectUrl=...&requestId=...&requestType=... :contentReference[oaicite:4]{index=4}
         var rawHash =
             $"accessKey={_opt.AccessKey}" +
             $"&amount={amountVnd}" +
@@ -97,7 +103,7 @@ public class Pay2SService
 
         resp.EnsureSuccessStatusCode();
 
-        var doc = JsonDocument.Parse(body);
+        using var doc = JsonDocument.Parse(body);
 
         if (doc.RootElement.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.False)
         {
@@ -108,40 +114,66 @@ public class Pay2SService
         if (doc.RootElement.TryGetProperty("payUrl", out var p) && p.ValueKind == JsonValueKind.String)
         {
             var payUrl = p.GetString();
-            if (!string.IsNullOrWhiteSpace(payUrl)) return payUrl!;
+            if (!string.IsNullOrWhiteSpace(payUrl))
+                return new CreateResult(payUrl!, orderId, requestId, amountVnd);
         }
 
         throw new InvalidOperationException("Pay2S create: missing payUrl. Body=" + body);
-
     }
 
-    // Redirect signature theo docs (Payment Notification) :contentReference[oaicite:5]{index=5}
-    public bool ValidateRedirectSignature(IQueryCollection qs)
+    // =========================================================
+    // Redirect signature theo docs (Payment Notification)
+    // ✅ Có overload nhận rawQueryString để tránh lệch do '+' -> ' '
+    // =========================================================
+    public bool ValidateRedirectSignature(IQueryCollection qs, string? rawQueryString = null)
     {
-        string Get(string k) => qs.TryGetValue(k, out var v) ? v.ToString() : "";
+        string GetDecoded(string k) => qs.TryGetValue(k, out var v) ? v.ToString() : "";
+        string GetRaw(string k) => TryGetRawQueryValue(rawQueryString, k) ?? GetDecoded(k);
 
-        var rawHash =
+        var raw1 =
             $"accessKey={_opt.AccessKey}" +
-            $"&amount={Get("amount")}" +
-            $"&message={Get("message")}" +
-            $"&orderId={Get("orderId")}" +
-            $"&orderInfo={Get("orderInfo")}" +
-            $"&orderType={Get("orderType")}" +
-            $"&partnerCode={Get("partnerCode")}" +
-            $"&payType={Get("payType")}" +
-            $"&requestId={Get("requestId")}" +
-            $"&responseTime={Get("responseTime")}" +
-            $"&resultCode={Get("resultCode")}";
+            $"&amount={GetDecoded("amount")}" +
+            $"&message={GetDecoded("message")}" +
+            $"&orderId={GetDecoded("orderId")}" +
+            $"&orderInfo={GetDecoded("orderInfo")}" +
+            $"&orderType={GetDecoded("orderType")}" +
+            $"&partnerCode={GetDecoded("partnerCode")}" +
+            $"&payType={GetDecoded("payType")}" +
+            $"&requestId={GetDecoded("requestId")}" +
+            $"&responseTime={GetDecoded("responseTime")}" +
+            $"&resultCode={GetDecoded("resultCode")}";
 
-        var expected = HmacSha256HexLower(_opt.SecretKey, rawHash);
-        var received = Get("m2signature");
+        var expected1 = HmacSha256HexLower(_opt.SecretKey, raw1);
+        var received = GetDecoded("m2signature");
 
-        var ok = string.Equals(received, expected, StringComparison.OrdinalIgnoreCase);
-        if (!ok) _log.LogWarning("PAY2S redirect signature FAIL rawHash={rawHash} expected={exp} recv={recv}", rawHash, expected, received);
+        if (string.Equals(received, expected1, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var raw2 =
+            $"accessKey={_opt.AccessKey}" +
+            $"&amount={GetRaw("amount")}" +
+            $"&message={GetRaw("message")}" +
+            $"&orderId={GetRaw("orderId")}" +
+            $"&orderInfo={GetRaw("orderInfo")}" +
+            $"&orderType={GetRaw("orderType")}" +
+            $"&partnerCode={GetRaw("partnerCode")}" +
+            $"&payType={GetRaw("payType")}" +
+            $"&requestId={GetRaw("requestId")}" +
+            $"&responseTime={GetRaw("responseTime")}" +
+            $"&resultCode={GetRaw("resultCode")}";
+
+        var expected2 = HmacSha256HexLower(_opt.SecretKey, raw2);
+
+        var ok = string.Equals(received, expected2, StringComparison.OrdinalIgnoreCase);
+        if (!ok)
+        {
+            _log.LogWarning(
+                "PAY2S redirect signature FAIL. raw1={raw1} exp1={exp1} raw2={raw2} exp2={exp2} recv={recv}",
+                raw1, expected1, raw2, expected2, received);
+        }
         return ok;
     }
 
-    // IPN signature theo docs (Instant Payment Notification) :contentReference[oaicite:6]{index=6}
     public bool ValidateIpnSignature(Pay2SIpnModel m)
     {
         var extraData = m.extraData ?? "";
@@ -180,7 +212,6 @@ public class Pay2SService
 
     private static string BuildOrderInfo(string orderCode)
     {
-        // chỉ chữ + số
         var s = new string(orderCode.Where(char.IsLetterOrDigit).ToArray());
         if (string.IsNullOrWhiteSpace(s)) s = "ORDER";
 
@@ -188,6 +219,28 @@ public class Pay2SService
         if (s.Length > 32) s = s.Substring(0, 32);
         if (s.Length < 10) s = s.PadRight(10, '0');
         return s;
+    }
+
+    private static string? TryGetRawQueryValue(string? rawQueryString, string key)
+    {
+        if (string.IsNullOrWhiteSpace(rawQueryString)) return null;
+
+        var s = rawQueryString!;
+        if (s.StartsWith("?")) s = s.Substring(1);
+        if (s.Length == 0) return null;
+
+        var parts = s.Split('&', StringSplitOptions.RemoveEmptyEntries);
+        foreach (var p in parts)
+        {
+            var idx = p.IndexOf('=');
+            if (idx <= 0) continue;
+
+            var k = p.Substring(0, idx);
+            if (!string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) continue;
+
+            return p.Substring(idx + 1);
+        }
+        return null;
     }
 }
 

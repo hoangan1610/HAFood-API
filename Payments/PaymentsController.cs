@@ -1,689 +1,662 @@
-﻿// HAShop.Api/Controllers/PaymentsController.cs
-using Dapper;
+﻿using Dapper;
 using HAShop.Api.Data;
 using HAShop.Api.Options;
 using HAShop.Api.Payments;
+using HAShop.Api.Services;
+using HAShop.Api.Utils;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System;
+using System.Data;
 using System.Data.Common;
+using System.Globalization;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
-using System.Security.Cryptography;
-using System.Collections.Generic;
-using System.Linq;
-
+using System.Threading;
+using System.Threading.Tasks;
 
 [ApiController]
 public class PaymentsController : ControllerBase
 {
     private readonly Pay2SService _pay2s;
+    private readonly MomoService _momo;
     private readonly ISqlConnectionFactory _db;
     private readonly ILogger<PaymentsController> _log;
     private readonly IOptions<PaymentsFlags> _flags;
     private readonly IOptions<FrontendOptions> _fe;
+
     private readonly IOptions<ZaloPayOptions> _zpOpt;
+    private readonly IZaloPayGateway _zpGateway;
+
+    private readonly IWebHostEnvironment _env;
+
+    private const int METHOD_MOMO = 1;
+    private const int METHOD_PAY2S = 2;
+    private const int METHOD_ZALOPAY = 9;
+
+    private const string PROV_MOMO = "MOMO";
+    private const string PROV_PAY2S = "PAY2S";
+    private const string PROV_ZALOPAY = "ZALOPAY";
+
+    private const string FE_CHECKOUT_CONFIRM = "/CartPage/CheckoutConfirm";
+    private const string FE_THANKYOU = "/CartPage/ThankYou";
+
+    private const string DEV_FE_BASE = "https://localhost:44336";
+    private const string DEV_API_BASE = "http://localhost:8080";
 
     public PaymentsController(
-     Pay2SService pay2s,
-     ISqlConnectionFactory db,
-     ILogger<PaymentsController> log,
-     IOptions<PaymentsFlags> flags,
-     IOptions<FrontendOptions> fe,
-     IOptions<ZaloPayOptions> zpOpt)
+        Pay2SService pay2s,
+        MomoService momo,
+        ISqlConnectionFactory db,
+        ILogger<PaymentsController> log,
+        IOptions<PaymentsFlags> flags,
+        IOptions<FrontendOptions> fe,
+        IOptions<ZaloPayOptions> zpOpt,
+        IZaloPayGateway zpGateway,
+        IWebHostEnvironment env)
     {
         _pay2s = pay2s;
+        _momo = momo;
         _db = db;
         _log = log;
         _flags = flags;
         _fe = fe;
         _zpOpt = zpOpt;
+        _zpGateway = zpGateway;
+        _env = env;
     }
 
-
-    // =========================
-    // USER RETURN (UI)  (giữ route cũ vnpay-return nhưng xử lý Pay2S)
-    // =========================
-    //[HttpGet("payment/vnpay-return")]
-    //public async Task<IActionResult> VnPayReturn()
-    //{
-    //    _log.LogInformation("PAY2S REDIRECT query: {q}", Request.QueryString.Value);
-
-    //    // ✅ FIX: Pay2SService của bạn chỉ nhận 1 tham số
-    //    if (!_pay2s.ValidateRedirectSignature(Request.Query))
-    //    {
-    //        _log.LogWarning("PAY2S REDIRECT invalid signature");
-    //        return Redirect(ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s"));
-    //    }
-
-    //    var resultCode = (string?)Request.Query["resultCode"]; // success = "0"
-    //    var orderCode = (string?)Request.Query["orderId"];    // orderId = orderCode lúc create
-    //    var amountRaw = (string?)Request.Query["amount"];     // VND
-
-    //    long? amountVnd = null;
-    //    if (long.TryParse(amountRaw, out var a)) amountVnd = a;
-
-    //    if (_flags.Value.ConfirmOnReturnIfOk &&
-    //        resultCode == "0" &&
-    //        !string.IsNullOrWhiteSpace(orderCode))
-    //    {
-    //        await ConfirmPaymentAsync(orderCode!, amountVnd, provider: "PAY2S", method: 2, forceWhenReturn: true);
-    //    }
-
-    //    string url;
-    //    if (resultCode == "0")
-    //    {
-    //        url = string.IsNullOrWhiteSpace(orderCode)
-    //            ? ComposeFeUrl("/CartPage/ThankYou.aspx")
-    //            : ComposeFeUrl($"/CartPage/ThankYou.aspx?code={Uri.EscapeDataString(orderCode)}");
-    //    }
-    //    else
-    //    {
-    //        url = string.IsNullOrWhiteSpace(orderCode)
-    //            ? ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s")
-    //            : ComposeFeUrl($"/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s&code={Uri.EscapeDataString(orderCode)}");
-    //    }
-
-    //    return Redirect(url);
-    //}
-
-    // =========================
-    // IPN (SERVER-TO-SERVER) (giữ route cũ vnpay-ipn nhưng xử lý Pay2S)
-    // =========================
-    //[HttpPost("payment/vnpay-ipn")]
-    //public async Task<IActionResult> VnPayIpn()
-    //{
-    //    var model = await ReadPay2SIpnAsync();
-    //    _log.LogInformation("PAY2S IPN payload: {m}", JsonSerializer.Serialize(model));
-
-    //    if (model is null || string.IsNullOrWhiteSpace(model.orderId))
-    //        return Ok(new { success = false });
-
-    //    if (!_pay2s.ValidateIpnSignature(model))
-    //    {
-    //        _log.LogWarning("PAY2S IPN invalid signature");
-    //        return Ok(new { success = false });
-    //    }
-
-    //    var orderCode = model.orderId;
-    //    var amountVnd = (long?)model.amount;
-
-    //    if (model.resultCode == 0)
-    //    {
-    //        var ok = await ConfirmPaymentAsync(orderCode, amountVnd, provider: "PAY2S", method: 2, forceWhenReturn: false);
-    //        if (!ok) return Ok(new { success = false });
-
-    //        _log.LogInformation("PAY2S IPN: set Paid for {code}", orderCode);
-    //        return Ok(new { success = true });
-    //    }
-    //    else
-    //    {
-    //        using var con = _db.Create();
-    //        await con.ExecuteAsync("""
-    //            UPDATE dbo.tbl_orders
-    //            SET payment_status='Failed', updated_at=SYSDATETIME()
-    //            WHERE order_code=@c
-    //        """, new { c = orderCode });
-
-    //        _log.LogInformation("PAY2S IPN: set Failed for {code}, resultCode={rc}", orderCode, model.resultCode);
-    //        return Ok(new { success = true });
-    //    }
-    //}
-
-    // =========================
-    // Helper: đọc IPN cả JSON lẫn form-urlencoded
-    // =========================
-    private async Task<Pay2SIpnModel?> ReadPay2SIpnAsync(CancellationToken ct)
+    // =========================================================
+    // ✅ Resolve order_code từ providerOrderId (payment_ref) hoặc legacy order_code
+    // =========================================================
+    private async Task<string?> ResolveOrderCodeAsync(string? providerOrderId, CancellationToken ct)
     {
+        var id = (providerOrderId ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(id)) return null;
+
+        using var con = _db.Create();
+        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
+        else con.Open();
+
+        var code = await con.ExecuteScalarAsync<string?>(new CommandDefinition(
+            """
+            SELECT TOP(1) order_code
+            FROM dbo.tbl_orders
+            WHERE order_code=@id OR payment_ref=@id
+            """,
+            new { id },
+            cancellationToken: ct,
+            commandTimeout: 10
+        ));
+
+        return string.IsNullOrWhiteSpace(code) ? null : code;
+    }
+
+    // =========================================================
+    // CREATE ZALOPAY ORDER
+    // =========================================================
+    public sealed class ZaloPayCreateRequest
+    {
+        public string OrderCode { get; set; } = "";
+        public long AmountVnd { get; set; }
+        public string? Description { get; set; }
+        public string? AppUser { get; set; }
+        public string? ClientReturnUrl { get; set; }
+        public string? ClientPlatform { get; set; }
+    }
+
+    [HttpPost("payment/zalopay-create")]
+    public async Task<IActionResult> ZaloPayCreate([FromBody] ZaloPayCreateRequest req, CancellationToken ct)
+    {
+        if (req == null) return BadRequest(new { ok = false, message = "missing body" });
+
+        var orderCode = (req.OrderCode ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(orderCode))
+            return BadRequest(new { ok = false, message = "orderCode required" });
+
+        if (req.AmountVnd <= 0)
+            return BadRequest(new { ok = false, message = "amountVnd must be > 0" });
+
+        var platform = (req.ClientPlatform ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(platform))
+            platform = Request.Headers.TryGetValue("X-Client-Platform", out var p) ? (p.ToString() ?? "") : "";
+        platform = platform.Trim().ToLowerInvariant();
+
+        var desc = string.IsNullOrWhiteSpace(req.Description)
+            ? $"Thanh toan don {orderCode}"
+            : req.Description!.Trim();
+
         try
         {
-            if (Request.HasFormContentType)
+            var zp = await _zpGateway.CreateOrderAsync(
+                orderCode: orderCode,
+                amountVnd: req.AmountVnd,
+                description: desc,
+                appUser: req.AppUser,
+                clientReturnUrl: req.ClientReturnUrl,
+                ct: ct
+            );
+
+            var m = await MarkPendingAndLogCreateAsync(
+                orderCode: orderCode,
+                amountVnd: req.AmountVnd,
+                provider: PROV_ZALOPAY,
+                method: METHOD_ZALOPAY,
+                transactionId: zp.app_trans_id ?? Guid.NewGuid().ToString("N"),
+                ct: ct
+            );
+
+            if (!m.ok)
             {
-                var form = await Request.ReadFormAsync(ct);
-
-                static long L(string s) => long.TryParse(s, out var v) ? v : 0;
-                static int I(string s) => int.TryParse(s, out var v) ? v : -1;
-
-                return new Pay2SIpnModel
+                return Ok(new
                 {
-                    partnerCode = form["partnerCode"].ToString(),
-                    orderId = form["orderId"].ToString(),
-                    requestId = form["requestId"].ToString(),
-                    amount = L(form["amount"].ToString()),
-                    orderInfo = form["orderInfo"].ToString(),
-                    orderType = form["orderType"].ToString(),
-                    transId = L(form["transId"].ToString()),
-                    resultCode = I(form["resultCode"].ToString()),
-                    message = form["message"].ToString(),
-                    payType = form["payType"].ToString(),
-                    responseTime = form["responseTime"].ToString(),
-                    extraData = form["extraData"].ToString(),
-                    m2signature = form["m2signature"].ToString(),
-                };
+                    ok = false,
+                    code = m.errCode,
+                    message = "ZaloPay created but cannot mark pending",
+                    provider = PROV_ZALOPAY,
+                    order_url = zp.order_url,
+                    app_trans_id = zp.app_trans_id,
+                    zp_trans_token = zp.zp_trans_token
+                });
             }
 
-            using var reader = new StreamReader(Request.Body, Encoding.UTF8);
-            var body = await reader.ReadToEndAsync(ct);
-            if (string.IsNullOrWhiteSpace(body)) return null;
+            return Ok(new
+            {
+                ok = true,
+                provider = PROV_ZALOPAY,
+                order_url = zp.order_url,
+                zp_trans_token = zp.zp_trans_token,
+                app_trans_id = zp.app_trans_id,
+                qr_code = zp.qr_code,
+                client_platform = platform
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "ZP create failed for {code} platform={platform}", orderCode, platform);
+            return Ok(new { ok = false, message = "ZaloPay create failed" });
+        }
+    }
 
-            return JsonSerializer.Deserialize<Pay2SIpnModel>(body, new JsonSerializerOptions
+    // =========================================================
+    // CREATE MOMO PAYMENT
+    // =========================================================
+    public sealed class MomoCreateRequest
+    {
+        public string OrderCode { get; set; } = "";
+        public long AmountVnd { get; set; }
+        public string? Description { get; set; }
+        public string? ExtraDataBase64 { get; set; }
+    }
+
+    [HttpPost("payment/momo-create")]
+    public async Task<IActionResult> MomoCreate([FromBody] MomoCreateRequest req, CancellationToken ct)
+    {
+        if (req == null) return BadRequest(new { ok = false, message = "missing body" });
+
+        var orderCode = (req.OrderCode ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(orderCode))
+            return BadRequest(new { ok = false, message = "orderCode required" });
+
+        if (req.AmountVnd <= 0)
+            return BadRequest(new { ok = false, message = "amountVnd must be > 0" });
+
+        var desc = string.IsNullOrWhiteSpace(req.Description)
+            ? $"Thanh toan don {orderCode}"
+            : req.Description!.Trim();
+
+        string? redirectOverride = null;
+        if (_env.IsDevelopment())
+        {
+            redirectOverride = DEV_API_BASE.TrimEnd('/') + "/payment/momo-return";
+        }
+
+        _log.LogInformation("MOMO DEV override env={env} isDev={isDev} redirectOverride={override}",
+            _env.EnvironmentName, _env.IsDevelopment(), redirectOverride);
+
+        var r = await _momo.CreatePaymentAsync(
+            orderCode: orderCode,
+            amountVnd: req.AmountVnd,
+            orderInfo: desc,
+            extraDataBase64: (req.ExtraDataBase64 ?? ""),
+            ct: ct,
+            redirectUrlOverride: redirectOverride,
+            ipnUrlOverride: null
+        );
+
+        // ✅ FIX QUAN TRỌNG: payment_ref phải là providerOrderId (r.orderId)
+        var m = await MarkPendingAndLogCreateAsync(
+            orderCode: orderCode,
+            amountVnd: req.AmountVnd,
+            provider: PROV_MOMO,
+            method: METHOD_MOMO,
+            transactionId: r.orderId,  // ✅ trước bạn dùng requestId -> sai cho resolve
+            ct: ct
+        );
+
+        return Ok(new
+        {
+            ok = m.ok,
+            provider = PROV_MOMO,
+            order_url = r.payUrl,
+            redirect_override = redirectOverride,
+            errCode = m.errCode,
+            provider_order_id = r.orderId
+        });
+    }
+
+    // =========================================================
+    // USER RETURN (UI) - MOMO
+    // =========================================================
+    [HttpGet("payment/momo-return")]
+    public async Task<IActionResult> MomoReturn(CancellationToken ct)
+    {
+        _log.LogInformation("MOMO REDIRECT query: {q}", Request.QueryString.Value);
+
+        var partnerCode = QFirst(Request.Query, "partnerCode");
+        var providerOrderId = QFirst(Request.Query, "orderId"); // ✅ giờ là providerOrderId
+        var requestId = QFirst(Request.Query, "requestId");
+        var amountRaw = QFirst(Request.Query, "amount");
+        var orderInfo = QFirst(Request.Query, "orderInfo");
+        var orderType = QFirst(Request.Query, "orderType");
+        var transId = QFirst(Request.Query, "transId");
+        var resultCodeRaw = QFirst(Request.Query, "resultCode");
+        var message = QFirst(Request.Query, "message");
+        var payType = QFirst(Request.Query, "payType");
+        var responseTime = QFirst(Request.Query, "responseTime");
+        var extraData = QFirst(Request.Query, "extraData");
+        var signature = QFirst(Request.Query, "signature");
+
+        // ✅ Resolve orderCode thật từ payment_ref
+        var orderCode = (await ResolveOrderCodeAsync(providerOrderId, ct)) ?? (providerOrderId ?? "").Trim();
+
+        long? amountVnd = null;
+        if (long.TryParse(amountRaw, out var a) && a > 0) amountVnd = a;
+
+        if (!_momo.ValidateResultSignature(
+                amountRaw, extraData, message, providerOrderId, orderInfo, orderType,
+                partnerCode, payType, requestId, responseTime, resultCodeRaw, transId, signature))
+        {
+            _log.LogWarning("MOMO REDIRECT invalid signature providerOrderId={orderId} requestId={requestId}", providerOrderId, requestId);
+
+            if (!string.IsNullOrWhiteSpace(orderCode))
+            {
+                await MarkFailedAndReleaseAsync(
+                    orderCode: orderCode,
+                    provider: PROV_MOMO,
+                    method: METHOD_MOMO,
+                    newStatus: "Failed",
+                    errorCode: "SIG_INVALID",
+                    errorMessage: "Invalid signature on return",
+                    amountVnd: amountVnd,
+                    transactionId: !string.IsNullOrWhiteSpace(requestId) ? requestId : transId,
+                    ct: ct
+                );
+            }
+
+            return HtmlRedirect(ComposeFeUrl(
+                $"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=momo&sig=0&code={Uri.EscapeDataString(orderCode)}",
+                forceDevLocal: true));
+        }
+
+        var okRc = int.TryParse(resultCodeRaw, out var rc) && rc == 0;
+
+        if (_flags.Value.ConfirmOnReturnIfOk && okRc && !string.IsNullOrWhiteSpace(orderCode))
+        {
+            var ok = await ConfirmPaymentAsync(
+                orderCode, amountVnd,
+                provider: PROV_MOMO, method: METHOD_MOMO,
+                forceWhenReturn: true, ct);
+
+            if (ok)
+            {
+                await TryNotifyAdminPaidOnceAsync(orderCode, PROV_MOMO, METHOD_MOMO, ct);
+                await TryNotifyUserPaidOnceAsync(orderCode, PROV_MOMO, METHOD_MOMO, ct);
+            }
+        }
+        else if (!okRc && !string.IsNullOrWhiteSpace(orderCode))
+        {
+            var newStt = (rc == 1006) ? "Canceled" : "Failed";
+
+            await MarkFailedAndReleaseAsync(
+                orderCode: orderCode,
+                provider: PROV_MOMO,
+                method: METHOD_MOMO,
+                newStatus: newStt,
+                errorCode: "RC_" + rc,
+                errorMessage: message ?? "",
+                amountVnd: amountVnd,
+                transactionId: !string.IsNullOrWhiteSpace(requestId) ? requestId : transId,
+                ct: ct
+            );
+        }
+
+        var url = okRc
+            ? (string.IsNullOrWhiteSpace(orderCode)
+                ? ComposeFeUrl(FE_THANKYOU, forceDevLocal: true)
+                : ComposeFeUrl($"{FE_THANKYOU}?code={Uri.EscapeDataString(orderCode)}", forceDevLocal: true))
+            : (string.IsNullOrWhiteSpace(orderCode)
+                ? ComposeFeUrl($"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=momo&rc={Uri.EscapeDataString(resultCodeRaw ?? "")}", forceDevLocal: true)
+                : ComposeFeUrl($"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=momo&rc={Uri.EscapeDataString(resultCodeRaw ?? "")}&code={Uri.EscapeDataString(orderCode)}", forceDevLocal: true));
+
+        return HtmlRedirect(url);
+    }
+
+    // =========================================================
+    // IPN (SERVER-TO-SERVER) - MOMO
+    // =========================================================
+    public sealed class MomoIpnModel
+    {
+        public string partnerCode { get; set; } = "";
+        public string orderId { get; set; } = ""; // ✅ providerOrderId
+        public string requestId { get; set; } = "";
+        public long amount { get; set; }
+        public string orderInfo { get; set; } = "";
+        public string orderType { get; set; } = "";
+        public long transId { get; set; }
+        public int resultCode { get; set; }
+        public string message { get; set; } = "";
+        public string payType { get; set; } = "";
+        public long responseTime { get; set; }
+        public string extraData { get; set; } = "";
+        public string signature { get; set; } = "";
+    }
+
+    [HttpPost("payment/momo-ipn")]
+    public async Task<IActionResult> MomoIpn(CancellationToken ct)
+    {
+        MomoIpnModel? model;
+
+        string body = "";
+        try
+        {
+            using var reader = new StreamReader(Request.Body, Encoding.UTF8);
+            body = await reader.ReadToEndAsync(ct);
+            if (string.IsNullOrWhiteSpace(body))
+                return Ok(new { resultCode = 1, message = "EMPTY_BODY" });
+
+            model = JsonSerializer.Deserialize<MomoIpnModel>(body, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "ReadPay2SIpnAsync failed");
-            return null;
+            _log.LogError(ex, "MOMO IPN read/parse failed body={body}", body);
+            return Ok(new { resultCode = 1, message = "PARSE_FAILED" });
         }
+
+        if (model == null || string.IsNullOrWhiteSpace(model.orderId))
+            return Ok(new { resultCode = 1, message = "MISSING_ORDERID" });
+
+        var sigOk = _momo.ValidateResultSignature(
+            amount: model.amount.ToString(CultureInfo.InvariantCulture),
+            extraData: model.extraData ?? "",
+            message: model.message ?? "",
+            orderId: model.orderId ?? "",
+            orderInfo: model.orderInfo ?? "",
+            orderType: model.orderType ?? "",
+            partnerCode: model.partnerCode ?? "",
+            payType: model.payType ?? "",
+            requestId: model.requestId ?? "",
+            responseTime: model.responseTime.ToString(CultureInfo.InvariantCulture),
+            resultCode: model.resultCode.ToString(CultureInfo.InvariantCulture),
+            transId: model.transId.ToString(CultureInfo.InvariantCulture),
+            receivedSignature: model.signature ?? ""
+        );
+
+        if (!sigOk)
+        {
+            _log.LogWarning("MOMO IPN invalid signature orderId={orderId} requestId={requestId}", model.orderId, model.requestId);
+            return Ok(new { resultCode = 1, message = "SIG_INVALID" });
+        }
+
+        // ✅ Resolve orderCode thật
+        var orderCode = (await ResolveOrderCodeAsync(model.orderId, ct)) ?? model.orderId.Trim();
+        var amountVnd = model.amount > 0 ? (long?)model.amount : null;
+
+        if (model.resultCode == 0)
+        {
+            var ok = await ConfirmPaymentAsync(orderCode, amountVnd, provider: PROV_MOMO, method: METHOD_MOMO, forceWhenReturn: false, ct);
+            if (ok)
+            {
+                await TryNotifyAdminPaidOnceAsync(orderCode, PROV_MOMO, METHOD_MOMO, ct);
+                await TryNotifyUserPaidOnceAsync(orderCode, PROV_MOMO, METHOD_MOMO, ct);
+            }
+
+            return Ok(new { resultCode = 0, message = "OK" });
+        }
+
+        var newStt = (model.resultCode == 1006) ? "Canceled" : "Failed";
+
+        await MarkFailedAndReleaseAsync(
+            orderCode: orderCode,
+            provider: PROV_MOMO,
+            method: METHOD_MOMO,
+            newStatus: newStt,
+            errorCode: "RC_" + model.resultCode,
+            errorMessage: model.message ?? "",
+            amountVnd: amountVnd,
+            transactionId: !string.IsNullOrWhiteSpace(model.requestId) ? model.requestId : model.transId.ToString(CultureInfo.InvariantCulture),
+            ct: ct
+        );
+
+        return Ok(new { resultCode = 0, message = "OK" });
     }
 
-
-    // =========================
-    // Helper: xác nhận thanh toán thành công (idempotent)
-    // =========================
-    // =========================
-    // Helper: xác nhận thanh toán thành công (idempotent + chống race)
-    // =========================
-    private async Task<bool> ConfirmPaymentAsync(
-    string orderCode,
-    long? amountVnd,
-    string provider,
-    int method,
-    bool forceWhenReturn,
-    CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(orderCode)) return false;
-
-        using var con = _db.Create();
-        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
-        else con.Open();
-
-        using var tx = con.BeginTransaction();
-
-        try
-        {
-            var o = await con.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-                """
-            SELECT id, pay_total, payment_status
-            FROM dbo.tbl_orders WITH (UPDLOCK, HOLDLOCK)
-            WHERE order_code=@c
-            """,
-                new { c = orderCode },
-                transaction: tx,
-                cancellationToken: ct,
-                commandTimeout: 15));
-
-            if (o == null)
-            {
-                tx.Rollback();
-                return false;
-            }
-
-            long orderId = (long)o.id;
-            string? payStatus = (string?)o.payment_status;
-
-            var existedPaidTx = await con.ExecuteScalarAsync<int>(new CommandDefinition(
-                """
-            SELECT COUNT(1)
-            FROM dbo.tbl_payment_transaction t
-            WHERE t.order_id = @oid AND t.status = 1 AND t.provider = @prov
-            """,
-                new { oid = orderId, prov = provider },
-                transaction: tx,
-                cancellationToken: ct,
-                commandTimeout: 15));
-
-            if (existedPaidTx > 0 || string.Equals(payStatus, "Paid", StringComparison.OrdinalIgnoreCase))
-            {
-                await con.ExecuteAsync(new CommandDefinition(
-                    """
-                UPDATE dbo.tbl_orders
-                SET payment_status='Paid',
-                    paid_at = COALESCE(paid_at, SYSDATETIME()),
-                    updated_at = SYSDATETIME()
-                WHERE id=@oid
-                """,
-                    new { oid = orderId },
-                    transaction: tx,
-                    cancellationToken: ct,
-                    commandTimeout: 15));
-
-                tx.Commit();
-                return true;
-            }
-
-            if (amountVnd.HasValue)
-            {
-                var expected = (long)Math.Round((decimal)o.pay_total, MidpointRounding.AwayFromZero);
-                if (expected != amountVnd.Value)
-                {
-                    await con.ExecuteAsync(new CommandDefinition(
-                        """
-                    INSERT dbo.tbl_payment_transaction
-                        (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
-                         error_code, error_message, created_at, updated_at)
-                    VALUES
-                        (@oid, @prov, @meth, 0, @amount, 'VND', @tx, @mref,
-                         'AMOUNT_MISMATCH', 'Amount mismatch (return/ipn)', SYSDATETIME(), SYSDATETIME())
-                    """,
-                        new
-                        {
-                            oid = orderId,
-                            prov = provider,
-                            meth = method,
-                            amount = amountVnd.Value,
-                            tx = Guid.NewGuid().ToString("N"),
-                            mref = orderCode
-                        },
-                        transaction: tx,
-                        cancellationToken: ct,
-                        commandTimeout: 15));
-
-                    tx.Commit();
-                    return false;
-                }
-            }
-            else if (!forceWhenReturn)
-            {
-                tx.Rollback();
-                return false;
-            }
-
-            await con.ExecuteAsync(new CommandDefinition(
-                """
-            IF NOT EXISTS (
-                SELECT 1 FROM dbo.tbl_payment_transaction
-                WHERE order_id=@oid AND status=1 AND provider=@prov
-            )
-            BEGIN
-                INSERT dbo.tbl_payment_transaction
-                    (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
-                     paid_at, created_at, updated_at)
-                VALUES
-                    (@oid, @prov, @meth, 1,
-                     COALESCE(@amount, (SELECT CAST(ROUND(pay_total,0) AS BIGINT) FROM dbo.tbl_orders WHERE id=@oid)),
-                     'VND', @tx, @mref, SYSDATETIME(), SYSDATETIME(), SYSDATETIME())
-            END
-            """,
-                new
-                {
-                    oid = orderId,
-                    amount = amountVnd,
-                    tx = Guid.NewGuid().ToString("N"),
-                    prov = provider,
-                    meth = method,
-                    mref = orderCode
-                },
-                transaction: tx,
-                cancellationToken: ct,
-                commandTimeout: 15));
-
-            await con.ExecuteAsync(new CommandDefinition(
-                """
-            UPDATE dbo.tbl_orders
-            SET payment_status='Paid',
-                paid_at = COALESCE(paid_at, SYSDATETIME()),
-                updated_at = SYSDATETIME()
-            WHERE id=@oid
-            """,
-                new { oid = orderId },
-                transaction: tx,
-                cancellationToken: ct,
-                commandTimeout: 15));
-
-            tx.Commit();
-            return true;
-        }
-        catch (Exception ex)
-        {
-            try { tx.Rollback(); } catch { }
-            _log.LogError(ex, "ConfirmPaymentAsync failed for {code}", orderCode);
-            return false;
-        }
-    }
-
-
-
-    // =========================
+    // =========================================================
     // USER RETURN (UI) - PAY2S
-    // =========================
-    // =========================
-    // USER RETURN (UI) - PAY2S
-    // =========================
+    // =========================================================
     [HttpGet("payment/pay2s-return")]
     public async Task<IActionResult> Pay2SReturn(CancellationToken ct)
     {
         _log.LogInformation("PAY2S REDIRECT query: {q}", Request.QueryString.Value);
 
-        if (!_pay2s.ValidateRedirectSignature(Request.Query))
-        {
-            _log.LogWarning("PAY2S REDIRECT invalid signature");
-            return Redirect(ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s"));
-        }
+        var amountRaw = QFirst(Request.Query, "amount");
+        var message = QFirst(Request.Query, "message");
+        var providerOrderId = QFirst(Request.Query, "orderId"); // ✅ giờ là providerOrderId
+        var requestId = QFirst(Request.Query, "requestId");
+        var resultCodeRaw = QFirst(Request.Query, "resultCode");
 
-        var rcRaw = (string?)Request.Query["resultCode"];
-        var okRc = int.TryParse(rcRaw, out var rc) && rc == 0;
-
-        var orderCode = ((string?)Request.Query["orderId"])?.Trim();
-        var amountRaw = (string?)Request.Query["amount"];
+        // ✅ Resolve orderCode thật
+        var orderCode = (await ResolveOrderCodeAsync(providerOrderId, ct)) ?? (providerOrderId ?? "").Trim();
 
         long? amountVnd = null;
         if (long.TryParse(amountRaw, out var a) && a > 0) amountVnd = a;
 
+        var sigOk = _pay2s.ValidateRedirectSignature(Request.Query, Request.QueryString.Value);
+
+        if (!sigOk)
+        {
+            _log.LogWarning("PAY2S REDIRECT invalid signature providerOrderId={orderId} requestId={requestId}", providerOrderId, requestId);
+
+            if (!string.IsNullOrWhiteSpace(orderCode))
+            {
+                await MarkFailedAndReleaseAsync(
+                    orderCode: orderCode,
+                    provider: PROV_PAY2S,
+                    method: METHOD_PAY2S,
+                    newStatus: "Failed",
+                    errorCode: "SIG_INVALID",
+                    errorMessage: "Invalid signature on return",
+                    amountVnd: amountVnd,
+                    transactionId: requestId,
+                    ct: ct
+                );
+            }
+
+            return HtmlRedirect(ComposeFeUrl(
+                $"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=pay2s&sig=0&code={Uri.EscapeDataString(orderCode)}",
+                forceDevLocal: true));
+        }
+
+        var okRc = int.TryParse(resultCodeRaw, out var rc) && rc == 0;
+
         if (_flags.Value.ConfirmOnReturnIfOk && okRc && !string.IsNullOrWhiteSpace(orderCode))
         {
-            var ok = await ConfirmPaymentAsync(orderCode!, amountVnd, provider: "PAY2S", method: 2, forceWhenReturn: true, ct);
-            if (ok) await TryNotifyAdminPaidOnceAsync(orderCode!, "PAY2S", 2, ct);
+            var ok = await ConfirmPaymentAsync(
+                orderCode, amountVnd,
+                provider: PROV_PAY2S, method: METHOD_PAY2S,
+                forceWhenReturn: true, ct);
 
+            if (ok)
+            {
+                await TryNotifyAdminPaidOnceAsync(orderCode, PROV_PAY2S, METHOD_PAY2S, ct);
+                await TryNotifyUserPaidOnceAsync(orderCode, PROV_PAY2S, METHOD_PAY2S, ct);
+            }
+        }
+        else if (!okRc && !string.IsNullOrWhiteSpace(orderCode))
+        {
+            await MarkFailedAndReleaseAsync(
+                orderCode: orderCode,
+                provider: PROV_PAY2S,
+                method: METHOD_PAY2S,
+                newStatus: "Failed",
+                errorCode: "RC_" + rc,
+                errorMessage: message ?? "",
+                amountVnd: amountVnd,
+                transactionId: requestId,
+                ct: ct
+            );
         }
 
         var url = okRc
             ? (string.IsNullOrWhiteSpace(orderCode)
-                ? ComposeFeUrl("/CartPage/ThankYou.aspx")
-                : ComposeFeUrl($"/CartPage/ThankYou.aspx?code={Uri.EscapeDataString(orderCode)}"))
+                ? ComposeFeUrl(FE_THANKYOU, forceDevLocal: true)
+                : ComposeFeUrl($"{FE_THANKYOU}?code={Uri.EscapeDataString(orderCode)}", forceDevLocal: true))
             : (string.IsNullOrWhiteSpace(orderCode)
-                ? ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s")
-                : ComposeFeUrl($"/CartPage/CheckoutConfirm.aspx?payfail=1&prov=pay2s&code={Uri.EscapeDataString(orderCode)}"));
+                ? ComposeFeUrl($"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=pay2s&rc={Uri.EscapeDataString(resultCodeRaw ?? "")}", forceDevLocal: true)
+                : ComposeFeUrl($"{FE_CHECKOUT_CONFIRM}?payfail=1&prov=pay2s&rc={Uri.EscapeDataString(resultCodeRaw ?? "")}&code={Uri.EscapeDataString(orderCode)}", forceDevLocal: true));
 
-        return Redirect(url);
+        return HtmlRedirect(url);
     }
 
+    // =========================================================
+    // Utils
+    // =========================================================
+    private static string QFirst(IQueryCollection q, string key)
+        => q.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? "") : "";
 
-
-    // =========================
-    // IPN (SERVER-TO-SERVER) - PAY2S
-    // =========================
-    [HttpPost("payment/pay2s-ipn")]
-    public async Task<IActionResult> Pay2SIpn(CancellationToken ct)
+    private string ComposeFeUrl(string pathAndQuery, bool forceDevLocal)
     {
-        var model = await ReadPay2SIpnAsync(ct);
-        _log.LogInformation("PAY2S IPN model: {m}", System.Text.Json.JsonSerializer.Serialize(model));
+        string baseUrl;
 
-        if (model == null || string.IsNullOrWhiteSpace(model.orderId))
-            return Ok(new { success = false });
-
-        if (!_pay2s.ValidateIpnSignature(model))
+        if (forceDevLocal && _env.IsDevelopment() && !string.IsNullOrWhiteSpace(DEV_FE_BASE))
         {
-            _log.LogWarning("PAY2S IPN invalid signature");
-            return Ok(new { success = false }); // để Pay2S retry
+            baseUrl = DEV_FE_BASE.TrimEnd('/');
+        }
+        else
+        {
+            baseUrl = (_fe?.Value?.BaseUrl ?? "").TrimEnd('/');
         }
 
-        var orderCode = model.orderId.Trim();
-        var amountVnd = (long?)model.amount;
-
-        if (model.resultCode == 0)
-        {
-            var ok = await ConfirmPaymentAsync(orderCode, amountVnd, provider: "PAY2S", method: 2, forceWhenReturn: false, ct);
-            if (ok) await TryNotifyAdminPaidOnceAsync(orderCode, "PAY2S", 2, ct);
-
-            return Ok(new { success = ok });
-        }
-
-        using (var con = _db.Create())
-        {
-            await con.ExecuteAsync(new CommandDefinition("""
-            UPDATE dbo.tbl_orders
-            SET payment_status='Failed', updated_at=SYSDATETIME()
-            WHERE order_code=@c
-        """, new { c = orderCode }, cancellationToken: ct, commandTimeout: 15));
-        }
-
-        return Ok(new { success = true });
-    }
-
-    private static string QFirst(Microsoft.AspNetCore.Http.IQueryCollection q, string key)
-    => q.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? "") : "";
-
-    private static string FFirst(Microsoft.AspNetCore.Http.IFormCollection f, string key)
-        => f.TryGetValue(key, out var v) ? (v.FirstOrDefault() ?? "") : "";
-
-    private static string HmacSha256Hex(string key, string data, bool lower)
-    {
-        using var h = new HMACSHA256(Encoding.UTF8.GetBytes(key ?? ""));
-        var hash = h.ComputeHash(Encoding.UTF8.GetBytes(data ?? ""));
-        var sb = new StringBuilder(hash.Length * 2);
-        var fmt = lower ? "x2" : "X2";
-        foreach (var b in hash) sb.Append(b.ToString(fmt));
-        return sb.ToString();
-    }
-
-    // ✅ ZaloPay Redirect checksum verify (GET return)
-    private bool ValidateZaloPayRedirectChecksum(
-        string appid,
-        string apptransid,
-        string pmcid,
-        string bankcode,
-        string amount,
-        string discountamount,
-        string status,
-        string checksum)
-    {
-        // raw = appid|apptransid|pmcid|bankcode|amount|discountamount|status
-        var raw = $"{appid}|{apptransid}|{pmcid}|{bankcode}|{amount}|{discountamount}|{status}";
-
-        var opt = _zpOpt.Value;
-        var computed = HmacSha256Hex(opt.Key2 ?? "", raw, opt.LowercaseMac);
-
-        var ok = (checksum ?? "").Equals(computed, StringComparison.OrdinalIgnoreCase);
-        if (!ok)
-            _log.LogWarning("ZP checksum FAIL. raw={raw} computed={c} received={r}", raw, computed, checksum);
-
-        return ok;
-    }
-    [HttpGet("payment/zalopay-return")]
-    public async Task<IActionResult> ZaloPayReturn(CancellationToken ct)
-    {
-        _log.LogInformation("ZP REDIRECT query: {q}", Request.QueryString.Value);
-
-        // ⚠️ lấy FIRST để né duplicate param
-        var appid = QFirst(Request.Query, "appid");
-        var apptransid = QFirst(Request.Query, "apptransid");
-        var pmcid = QFirst(Request.Query, "pmcid");
-        var bankcode = QFirst(Request.Query, "bankcode");
-        var amountRaw = QFirst(Request.Query, "amount");
-        var discountRaw = QFirst(Request.Query, "discountamount");
-        var statusRaw = QFirst(Request.Query, "status");
-        var checksum = QFirst(Request.Query, "checksum");
-
-        // order code (bạn đang append ?code=... trong redirecturl)
-        var orderCode = (QFirst(Request.Query, "code") ?? "").Trim();
-        if (string.IsNullOrWhiteSpace(orderCode))
-            orderCode = (DeriveOrderCodeFromAppTransId(apptransid) ?? "").Trim();
-
-        // Validate checksum
-        if (!ValidateZaloPayRedirectChecksum(appid, apptransid, pmcid, bankcode, amountRaw, discountRaw, statusRaw, checksum))
-        {
-            _log.LogWarning("ZP REDIRECT invalid checksum");
-            return Redirect(ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=zalopay"));
-        }
-
-        int.TryParse(statusRaw, out var status);
-        var okStatus = (status == 1); // ✅ ZP redirect: status=1 = thanh toán thành công
-
-        long? amountVnd = null;
-        if (long.TryParse(amountRaw, out var a) && a > 0) amountVnd = a;
-
-        if (!string.IsNullOrWhiteSpace(orderCode))
-        {
-            if (okStatus)
-            {
-                // (tuỳ chọn) confirm on return
-                if (_flags.Value.ConfirmOnReturnIfOk)
-                {
-                    var ok = await ConfirmPaymentAsync(
-                        orderCode,
-                        amountVnd,
-                        provider: "ZALOPAY",
-                        method: 1,
-                        forceWhenReturn: true,
-                        ct);
-
-                    if (ok) await TryNotifyAdminPaidOnceAsync(orderCode, "ZALOPAY", 1, ct);
-                }
-            }
-            else
-            {
-                // ✅ status != 1: user cancel / fail
-                var newPaymentStatus = "Unpaid";
-                if (status > 0 && status != 1) newPaymentStatus = "Failed";
-
-                using var con = _db.Create();
-                await con.ExecuteAsync(new CommandDefinition(
-                    """
-                UPDATE dbo.tbl_orders
-                SET payment_status=@stt, updated_at=SYSDATETIME()
-                WHERE order_code=@c
-                """,
-                    new { c = orderCode, stt = newPaymentStatus },
-                    cancellationToken: ct,
-                    commandTimeout: 15));
-            }
-        }
-
-        // Redirect FE
-        var url = okStatus
-            ? (string.IsNullOrWhiteSpace(orderCode)
-                ? ComposeFeUrl("/CartPage/ThankYou.aspx")
-                : ComposeFeUrl($"/CartPage/ThankYou.aspx?code={Uri.EscapeDataString(orderCode)}"))
-            : (string.IsNullOrWhiteSpace(orderCode)
-                ? ComposeFeUrl("/CartPage/CheckoutConfirm.aspx?payfail=1&prov=zalopay")
-                : ComposeFeUrl($"/CartPage/CheckoutConfirm.aspx?payfail=1&prov=zalopay&code={Uri.EscapeDataString(orderCode)}"));
-
-        return Redirect(url);
-    }
-
-    [HttpPost("payment/zalopay-ipn")]
-    public async Task<IActionResult> ZaloPayIpn(CancellationToken ct)
-    {
-        try
-        {
-            // ZP callback thường là form-urlencoded: data + mac
-            if (!Request.HasFormContentType)
-            {
-                _log.LogWarning("ZP IPN: not form content type");
-                return Ok(new { return_code = -1, return_message = "invalid content-type" });
-            }
-
-            var form = await Request.ReadFormAsync(ct);
-            var data = FFirst(form, "data");
-            var mac = FFirst(form, "mac");
-
-            if (string.IsNullOrWhiteSpace(data) || string.IsNullOrWhiteSpace(mac))
-            {
-                _log.LogWarning("ZP IPN: missing data/mac");
-                return Ok(new { return_code = -1, return_message = "missing data/mac" });
-            }
-
-            // verify mac = HMAC_SHA256(Key2, data)
-            var opt = _zpOpt.Value;
-            var computed = HmacSha256Hex(opt.Key2 ?? "", data, opt.LowercaseMac);
-
-            if (!mac.Equals(computed, StringComparison.OrdinalIgnoreCase))
-            {
-                _log.LogWarning("ZP IPN MAC FAIL. computed={c} received={r}", computed, mac);
-                return Ok(new { return_code = -1, return_message = "mac invalid" }); // để ZP retry
-            }
-
-            // parse data json
-            using var doc = JsonDocument.Parse(data);
-            var root = doc.RootElement;
-
-            var appTransId = root.TryGetProperty("app_trans_id", out var at) ? at.GetString() : null;
-            int status = root.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.Number ? st.GetInt32() : 0;
-            long amount = root.TryGetProperty("amount", out var am) && am.ValueKind == JsonValueKind.Number ? am.GetInt64() : 0;
-
-            // derive orderCode từ app_trans_id: yyMMdd_<orderCode>_<rnd>
-            var orderCode = DeriveOrderCodeFromAppTransId(appTransId);
-
-            _log.LogInformation("ZP IPN parsed: app_trans_id={atid} status={st} amount={amt} orderCode={code}",
-                appTransId, status, amount, orderCode);
-
-            if (string.IsNullOrWhiteSpace(orderCode))
-            {
-                // không map được order -> vẫn trả OK để khỏi retry vô hạn
-                return Ok(new { return_code = 1, return_message = "ok" });
-            }
-
-            if (status == 1)
-            {
-                var ok = await ConfirmPaymentAsync(
-                    orderCode,
-                    amount > 0 ? (long?)amount : null,
-                    provider: "ZALOPAY",
-                    method: 1,
-                    forceWhenReturn: false,
-                    ct);
-
-                if (ok) await TryNotifyAdminPaidOnceAsync(orderCode, "ZALOPAY", 1, ct);
-
-                return Ok(new { return_code = 1, return_message = "ok" });
-            }
-            else
-            {
-                // ✅ status != 1: user cancel / fail
-                // cancel -> Unpaid (để user chọn cổng khác), fail nặng -> Failed
-                var newPaymentStatus = "Unpaid";
-
-                // Quy ước đơn giản:
-                // - status âm / 0: cancel hoặc không thành công => Unpaid
-                // - status dương khác 1: fail => Failed
-                if (status > 0 && status != 1) newPaymentStatus = "Failed";
-
-                using var con = _db.Create();
-                await con.ExecuteAsync(new CommandDefinition(
-                    """
-                UPDATE dbo.tbl_orders
-                SET payment_status=@stt, updated_at=SYSDATETIME()
-                WHERE order_code=@c
-                """,
-                    new { c = orderCode, stt = newPaymentStatus },
-                    cancellationToken: ct,
-                    commandTimeout: 15));
-
-                return Ok(new { return_code = 1, return_message = "ok" });
-            }
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "ZP IPN error");
-            return Ok(new { return_code = 0, return_message = "internal error" });
-        }
-    }
-
-
-    // ✅ derive orderCode từ app_trans_id dạng yyMMdd_<orderCode>_<rnd>
-    private static string? DeriveOrderCodeFromAppTransId(string? appTransId)
-    {
-        if (string.IsNullOrWhiteSpace(appTransId)) return null;
-        var parts = appTransId.Split('_', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length >= 2) return parts[1]; // "251219000004"
-        return null;
-    }
-
-    private string ComposeFeUrl(string pathAndQuery)
-    {
-        var baseUrl = _fe?.Value?.BaseUrl?.TrimEnd('/') ?? "";
         if (string.IsNullOrEmpty(baseUrl))
+        {
             return pathAndQuery.StartsWith("/") ? pathAndQuery : "/" + pathAndQuery;
+        }
 
         if (!pathAndQuery.StartsWith("/")) pathAndQuery = "/" + pathAndQuery;
         return baseUrl + pathAndQuery;
     }
+
+    // =========================================================
+    // ✅ CONFIRM PAID: gọi thẳng USP
+    // =========================================================
+    private async Task<bool> ConfirmPaymentAsync(
+        string orderCode,
+        long? amountVnd,
+        string provider,
+        int method,
+        bool forceWhenReturn,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(orderCode)) return false;
+        if (!amountVnd.HasValue && !forceWhenReturn) return false;
+
+        using var con = _db.Create();
+        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
+        else con.Open();
+
+        var p = new DynamicParameters();
+        p.Add("@order_code", orderCode);
+        p.Add("@provider", provider);
+        p.Add("@method", (byte)method);
+        p.Add("@amount_vnd", amountVnd);
+        p.Add("@transaction_id", Guid.NewGuid().ToString("N"));
+        p.Add("@result", dbType: DbType.Boolean, direction: ParameterDirection.Output);
+
+        await con.ExecuteAsync(new CommandDefinition(
+            "dbo.usp_payment_confirm_paid",
+            p,
+            commandType: CommandType.StoredProcedure,
+            cancellationToken: ct,
+            commandTimeout: 30
+        ));
+
+        return p.Get<bool>("@result");
+    }
+
+    private async Task MarkFailedAndReleaseAsync(
+        string orderCode,
+        string provider,
+        int method,
+        string newStatus,
+        string? errorCode,
+        string? errorMessage,
+        long? amountVnd,
+        string? transactionId,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(orderCode)) return;
+
+        using var con = _db.Create();
+        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
+        else con.Open();
+
+        var p = new DynamicParameters();
+        p.Add("@order_code", orderCode);
+        p.Add("@provider", provider);
+        p.Add("@method", (byte)method);
+        p.Add("@new_status", newStatus);
+        p.Add("@error_code", errorCode);
+        p.Add("@error_message", errorMessage ?? "");
+        p.Add("@amount_vnd", amountVnd);
+        p.Add("@transaction_id", transactionId);
+
+        await con.ExecuteAsync(new CommandDefinition(
+            "dbo.usp_payment_mark_failed_and_release",
+            p,
+            commandType: CommandType.StoredProcedure,
+            cancellationToken: ct,
+            commandTimeout: 30
+        ));
+    }
+
+    // =========================================================
+    // Notify admin once (idempotent)
+    // =========================================================
     private async Task<bool> TryNotifyAdminPaidOnceAsync(
-    string orderCode,
-    string provider,
-    int method,
-    CancellationToken ct)
+        string orderCode,
+        string provider,
+        int method,
+        CancellationToken ct)
     {
         using var con = _db.Create();
 
         var row = await con.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
             """
-        SELECT id, order_code, pay_total, ship_name, ship_phone, ship_full_address,
-               payment_method, placed_at, paid_at
-        FROM dbo.tbl_orders
-        WHERE order_code=@c AND payment_status='Paid'
-        """,
+            SELECT id, order_code, pay_total, ship_name, ship_phone, ship_full_address,
+                   payment_method, placed_at, paid_at
+            FROM dbo.tbl_orders
+            WHERE order_code=@c AND payment_status='Paid'
+            """,
             new { c = orderCode },
             cancellationToken: ct,
             commandTimeout: 15));
@@ -692,13 +665,12 @@ public class PaymentsController : ControllerBase
 
         long orderId = (long)row.id;
 
-        // ✅ idempotent theo từng provider (tránh ZaloPay ghi đè Pay2S)
         var existed = await con.ExecuteScalarAsync<int>(new CommandDefinition(
             """
-        SELECT COUNT(1)
-        FROM dbo.tbl_payment_transaction
-        WHERE order_id=@oid AND error_code='ADMIN_TG_PAID' AND provider=@prov
-        """,
+            SELECT COUNT(1)
+            FROM dbo.tbl_payment_transaction
+            WHERE order_id=@oid AND error_code='ADMIN_TG_PAID' AND provider=@prov
+            """,
             new { oid = orderId, prov = provider },
             cancellationToken: ct,
             commandTimeout: 15));
@@ -707,19 +679,20 @@ public class PaymentsController : ControllerBase
 
         await con.ExecuteAsync(new CommandDefinition(
             """
-        INSERT dbo.tbl_payment_transaction
-            (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
-             error_code, error_message, created_at, updated_at)
-        VALUES
-            (@oid, @prov, @meth, 1, @amt, 'VND', @tx, @mref,
-             'ADMIN_TG_PAID', 'Telegram notified when paid', SYSDATETIME(), SYSDATETIME())
-        """,
+            INSERT dbo.tbl_payment_transaction
+                (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                 error_code, error_message, created_at, updated_at)
+            VALUES
+                (@oid, @prov, @meth, 1,
+                 CAST(@amt AS decimal(12,2)), 'VND', @tx, @mref,
+                 'ADMIN_TG_PAID', 'Telegram notified when paid', SYSDATETIME(), SYSDATETIME())
+            """,
             new
             {
                 oid = orderId,
                 prov = provider,
                 meth = method,
-                amt = (long)Math.Round((decimal)row.pay_total, MidpointRounding.AwayFromZero),
+                amt = (decimal)row.pay_total,
                 tx = Guid.NewGuid().ToString("N"),
                 mref = (string)row.order_code
             },
@@ -731,10 +704,10 @@ public class PaymentsController : ControllerBase
             ? null
             : (fullAddr.Length <= 100 ? fullAddr : fullAddr.Substring(0, 97) + "...");
 
-        var notifier = HttpContext.RequestServices.GetRequiredService<HAShop.Api.Services.IAdminOrderNotifier>();
+        var notifier = HttpContext.RequestServices.GetRequiredService<IAdminOrderNotifier>();
 
         await notifier.NotifyNewOrderAsync(
-            orderId,
+            (long)row.id,
             (string)row.order_code,
             (decimal)row.pay_total,
             (string?)row.ship_name ?? "",
@@ -747,5 +720,245 @@ public class PaymentsController : ControllerBase
         return true;
     }
 
+    // =========================================================
+    // Mark Pending + Log create (y nguyên nhưng pref giờ là providerOrderId)
+    // =========================================================
+    private async Task<(bool ok, long orderId, decimal payTotal, string? errCode)> MarkPendingAndLogCreateAsync(
+        string orderCode,
+        long amountVnd,
+        string provider,
+        int method,
+        string transactionId, // ✅ sẽ là providerOrderId (Momo/Pay2S)
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(orderCode)) return (false, 0, 0m, "ORDER_CODE_EMPTY");
+        if (amountVnd <= 0) return (false, 0, 0m, "AMOUNT_INVALID");
 
+        using var con = _db.Create();
+        if (con is DbConnection dbc) await dbc.OpenAsync(ct);
+        else con.Open();
+
+        using var tx = con.BeginTransaction();
+
+        try
+        {
+            var o = await con.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+                """
+                SELECT id, pay_total, payment_status
+                FROM dbo.tbl_orders WITH (UPDLOCK, HOLDLOCK)
+                WHERE order_code=@c
+                """,
+                new { c = orderCode },
+                transaction: tx,
+                cancellationToken: ct,
+                commandTimeout: 15));
+
+            if (o == null)
+            {
+                tx.Rollback();
+                return (false, 0, 0m, "ORDER_NOT_FOUND");
+            }
+
+            long orderId = (long)o.id;
+            decimal payTotal = (decimal)o.pay_total;
+            string? payStatus = (string?)o.payment_status;
+
+            if (string.Equals(payStatus, "Paid", StringComparison.OrdinalIgnoreCase))
+            {
+                tx.Rollback();
+                return (false, orderId, payTotal, "ORDER_ALREADY_PAID");
+            }
+
+            var expected = (long)Math.Round(payTotal, MidpointRounding.AwayFromZero);
+            if (expected != amountVnd)
+            {
+                await con.ExecuteAsync(new CommandDefinition(
+                    """
+                    INSERT dbo.tbl_payment_transaction
+                        (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                         error_code, error_message, created_at, updated_at)
+                    VALUES
+                        (@oid, @prov, @meth, 0, CAST(@amt AS decimal(12,2)), 'VND', @txid, @mref,
+                         'AMOUNT_MISMATCH', 'Create request amount mismatch', SYSDATETIME(), SYSDATETIME())
+                    """,
+                    new
+                    {
+                        oid = orderId,
+                        prov = provider,
+                        meth = method,
+                        amt = amountVnd,
+                        txid = transactionId ?? Guid.NewGuid().ToString("N"),
+                        mref = orderCode
+                    },
+                    transaction: tx,
+                    cancellationToken: ct,
+                    commandTimeout: 15));
+
+                tx.Commit();
+                return (false, orderId, payTotal, "AMOUNT_MISMATCH");
+            }
+
+            await con.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE dbo.tbl_orders
+                SET payment_status='Pending',
+                    payment_provider=@prov,
+                    payment_ref=@pref,
+                    updated_at=SYSDATETIME()
+                WHERE id=@id
+                """,
+                new { id = orderId, prov = provider, pref = transactionId },
+                transaction: tx,
+                cancellationToken: ct,
+                commandTimeout: 15));
+
+            await con.ExecuteAsync(new CommandDefinition(
+                """
+                INSERT dbo.tbl_payment_transaction
+                    (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                     created_at, updated_at)
+                VALUES
+                    (@oid, @prov, @meth, 0, CAST(@amt AS decimal(12,2)), 'VND', @txid, @mref,
+                     SYSDATETIME(), SYSDATETIME())
+                """,
+                new
+                {
+                    oid = orderId,
+                    prov = provider,
+                    meth = method,
+                    amt = expected,
+                    txid = transactionId ?? Guid.NewGuid().ToString("N"),
+                    mref = orderCode
+                },
+                transaction: tx,
+                cancellationToken: ct,
+                commandTimeout: 15));
+
+            tx.Commit();
+            return (true, orderId, payTotal, null);
+        }
+        catch (Exception ex)
+        {
+            try { tx.Rollback(); } catch { }
+            _log.LogError(ex, "MarkPendingAndLogCreateAsync failed code={code} prov={prov}", orderCode, provider);
+            return (false, 0, 0m, "DB_ERROR");
+        }
+    }
+
+    private ContentResult HtmlRedirect(string url)
+    {
+        var safeUrl = System.Net.WebUtility.HtmlEncode(url);
+
+        var html = $@"<!doctype html>
+<html lang=""vi"">
+<head>
+  <meta charset=""utf-8"" />
+  <meta name=""viewport"" content=""width=device-width, initial-scale=1"" />
+  <meta http-equiv=""refresh"" content=""0;url={safeUrl}"" />
+  <title>Redirecting…</title>
+</head>
+<body>
+  <script>
+    try {{
+      window.location.replace({System.Text.Json.JsonSerializer.Serialize(url)});
+    }} catch(e) {{
+      window.location.href = {System.Text.Json.JsonSerializer.Serialize(url)};
+    }}
+  </script>
+  <p>Đang chuyển về trang thanh toán…</p>
+  <p>Nếu không tự chuyển, bấm: <a href=""{safeUrl}"">Quay về</a></p>
+</body>
+</html>";
+
+        return Content(html, "text/html; charset=utf-8");
+    }
+
+    private async Task<bool> TryNotifyUserPaidOnceAsync(
+        string orderCode,
+        string provider,
+        int method,
+        CancellationToken ct)
+    {
+        using var con = _db.Create();
+
+        var row = await con.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+            """
+            SELECT id, user_info_id, order_code, pay_total, placed_at, paid_at
+            FROM dbo.tbl_orders
+            WHERE order_code=@c AND payment_status='Paid'
+            """,
+            new { c = orderCode },
+            cancellationToken: ct,
+            commandTimeout: 15));
+
+        if (row == null) return false;
+
+        long orderId = (long)row.id;
+        long userId = (long)row.user_info_id;
+        decimal payTotal = (decimal)row.pay_total;
+
+        var existed = await con.ExecuteScalarAsync<int>(new CommandDefinition(
+            """
+            SELECT COUNT(1)
+            FROM dbo.tbl_payment_transaction
+            WHERE order_id=@oid AND provider=@prov AND error_code='USER_INAPP_PAID'
+            """,
+            new { oid = orderId, prov = provider },
+            cancellationToken: ct,
+            commandTimeout: 15));
+
+        if (existed > 0) return true;
+
+        await con.ExecuteAsync(new CommandDefinition(
+            """
+            INSERT dbo.tbl_payment_transaction
+                (order_id, provider, method, status, amount, currency, transaction_id, merchant_ref,
+                 error_code, error_message, created_at, updated_at, paid_at)
+            VALUES
+                (@oid, @prov, @meth, 1, CAST(@amt AS decimal(12,2)), 'VND', @tx, @mref,
+                 'USER_INAPP_PAID', 'InApp notified when paid', SYSDATETIME(), SYSDATETIME(), SYSDATETIME())
+            """,
+            new
+            {
+                oid = orderId,
+                prov = provider,
+                meth = method,
+                amt = payTotal,
+                tx = Guid.NewGuid().ToString("N"),
+                mref = (string)row.order_code
+            },
+            cancellationToken: ct,
+            commandTimeout: 15));
+
+        int estPoints = payTotal > 0 ? (int)Math.Floor(payTotal / 1000m) : 0;
+
+        var dataObj = new
+        {
+            order_id = orderId,
+            order_code = (string)row.order_code,
+            provider = provider,
+            method = method,
+            pay_total = payTotal,
+            paid_at = (DateTime?)row.paid_at ?? (DateTime?)row.placed_at,
+            est_points = estPoints
+        };
+        var dataJson = JsonSerializer.Serialize(dataObj);
+
+        var title = $"Đơn {(string)row.order_code} đã thanh toán thành công";
+        var body = estPoints > 0
+            ? $"HAFood đã nhận được thanh toán. Nếu giao thành công, bạn sẽ nhận khoảng +{estPoints} điểm HAFood."
+            : "HAFood đã nhận được thanh toán cho đơn hàng của bạn.";
+
+        var notifications = HttpContext.RequestServices.GetRequiredService<INotificationService>();
+
+        await notifications.CreateInAppAsync(
+            userId,
+            NotificationTypes.ORDER_STATUS_CHANGED,
+            title,
+            body,
+            dataJson,
+            ct);
+
+        return true;
+    }
 }

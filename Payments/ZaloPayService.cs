@@ -12,7 +12,7 @@ using Microsoft.Extensions.Options;
 
 namespace HAShop.Api.Payments
 {
-    public class ZaloPayService : IZaloPayGateway
+    public sealed class ZaloPayService : IZaloPayGateway
     {
         private readonly ZaloPayOptions _opt;
         private readonly ILogger<ZaloPayService> _log;
@@ -20,6 +20,7 @@ namespace HAShop.Api.Payments
         public ZaloPayService(IOptions<ZaloPayOptions> opt, ILogger<ZaloPayService> log)
         {
             var v = opt.Value;
+
             v.Key1 = (v.Key1 ?? "").Trim();
             v.Key2 = (v.Key2 ?? "").Trim();
             v.CreateUrl = (v.CreateUrl ?? "").Trim();
@@ -32,11 +33,14 @@ namespace HAShop.Api.Payments
             _log = log;
         }
 
-        // Tạo app_trans_id mới theo format yymmdd_..._rnd để tránh trùng khi xin link nhiều lần
+        // yymmdd_<orderCodeTail>_<rnd>
         private static string NewAppTransId(string orderCode)
         {
-            var ymd = DateTime.UtcNow.ToString("yyMMdd"); // ZP yêu cầu yymmdd ở đầu
-            var rnd = RandomNumberGenerator.GetInt32(100, 1000); // 100..999
+            var vnNow = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+            var ymd = vnNow.ToString("yyMMdd");
+
+            var rnd = RandomNumberGenerator.GetInt32(100, 1000);
+
             var tail = string.IsNullOrWhiteSpace(orderCode)
                 ? "x"
                 : (orderCode.Length > 20 ? orderCode[^20..] : orderCode);
@@ -45,28 +49,31 @@ namespace HAShop.Api.Payments
             return raw.Length <= 64 ? raw : raw[..64];
         }
 
+
         public async Task<ZpCreateOrderResult> CreateOrderAsync(
-    string orderCode, long amountVnd, string description,
-    string? appUser, string? clientReturnUrl, CancellationToken ct)
+            string orderCode,
+            long amountVnd,
+            string description,
+            string? appUser,
+            string? clientReturnUrl,
+            CancellationToken ct)
         {
-            // ❗️Mỗi lần tạo link phải có app_trans_id mới → tránh sub_return_code = -68 (Mã giao dịch bị trùng)
             var app_trans_id = NewAppTransId(orderCode);
             var app_time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
-            // ✅ Redirect URL: CHỈ append code, KHÔNG append apptransid (ZaloPay tự gắn apptransid vào query)
+            // redirecturl: chỉ gắn code; ZP tự gắn apptransid/status/checksum khi redirect
             var baseRet = string.IsNullOrWhiteSpace(clientReturnUrl) ? _opt.ReturnUrl : clientReturnUrl;
 
-            // Nếu baseRet chưa có query -> ?, có rồi -> &
             var retWithQuery = baseRet.Contains('?')
                 ? $"{baseRet}&code={Uri.EscapeDataString(orderCode)}"
                 : $"{baseRet}?code={Uri.EscapeDataString(orderCode)}";
 
-            // embed_data: redirecturl + merchantinfo
             var embed = new
             {
                 redirecturl = retWithQuery,
                 merchantinfo = new { orderCode, app_trans_id }
             };
+
             var embedJson = JsonSerializer.Serialize(embed);
             var itemJson = "[]";
 
@@ -98,6 +105,7 @@ namespace HAShop.Api.Payments
 
             var resp = await http.SendAsync(req, ct);
             var text = await resp.Content.ReadAsStringAsync(ct);
+
             _log.LogInformation("ZP create resp: {code} {text}", (int)resp.StatusCode, text);
 
             if (!resp.IsSuccessStatusCode)
@@ -106,7 +114,7 @@ namespace HAShop.Api.Payments
             using var doc = JsonDocument.Parse(text);
             var root = doc.RootElement;
 
-            var return_code = root.GetProperty("return_code").GetInt32(); // 1 = success
+            var return_code = root.GetProperty("return_code").GetInt32();
             if (return_code != 1)
             {
                 var sub = root.TryGetProperty("sub_return_message", out var subEl) ? subEl.GetString() : null;
@@ -125,25 +133,22 @@ namespace HAShop.Api.Payments
             return new ZpCreateOrderResult(orderUrl!, qrCode, token!, app_trans_id);
         }
 
-
         public bool ValidateIpn(IDictionary<string, string> fields, out string raw, out string computed)
         {
             var data = fields.TryGetValue("data", out var d) ? d : "";
             raw = data;
             computed = HmacSha256Hex(_opt.Key2, data, _opt.LowercaseMac);
+
             var received = fields.TryGetValue("mac", out var mac) ? mac : "";
             var ok = received.Equals(computed, StringComparison.OrdinalIgnoreCase);
             if (!ok) _log.LogWarning("ZP IPN MAC FAIL. computed={c} received={r}", computed, received);
+
             return ok;
         }
 
         public bool ValidateReturn(IDictionary<string, string> fields, out string raw, out string computed)
-        {
-            // Return dùng cùng cách kiểm tra với IPN ở phía ZP
-            return ValidateIpn(fields, out raw, out computed);
-        }
+            => ValidateIpn(fields, out raw, out computed);
 
-        // Query trạng thái giao dịch theo app_trans_id
         public async Task<ZpQueryResult> QueryAsync(string appTransId, CancellationToken ct)
         {
             // mac = HMAC_SHA256(app_id|app_trans_id|key1)
@@ -165,6 +170,7 @@ namespace HAShop.Api.Payments
 
             var resp = await http.SendAsync(req, ct);
             var text = await resp.Content.ReadAsStringAsync(ct);
+
             _log.LogInformation("ZP query resp: {code} {text}", (int)resp.StatusCode, text);
 
             using var doc = JsonDocument.Parse(text);
@@ -172,7 +178,11 @@ namespace HAShop.Api.Payments
 
             var rc = root.GetProperty("return_code").GetInt32();
             var msg = root.TryGetProperty("return_message", out var m) ? m.GetString() : null;
-            long? amt = root.TryGetProperty("amount", out var a) && a.ValueKind == JsonValueKind.Number ? a.GetInt64() : null;
+
+            long? amt = null;
+            if (root.TryGetProperty("amount", out var a) && a.ValueKind == JsonValueKind.Number)
+                amt = a.GetInt64();
+
             var zpid = root.TryGetProperty("zp_trans_id", out var z) ? z.ToString() : null;
 
             return new ZpQueryResult(rc, msg, amt, zpid);
@@ -180,8 +190,8 @@ namespace HAShop.Api.Payments
 
         private static string HmacSha256Hex(string key, string data, bool lower)
         {
-            using var h = new HMACSHA256(Encoding.UTF8.GetBytes(key));
-            var hash = h.ComputeHash(Encoding.UTF8.GetBytes(data));
+            using var h = new HMACSHA256(Encoding.UTF8.GetBytes(key ?? ""));
+            var hash = h.ComputeHash(Encoding.UTF8.GetBytes(data ?? ""));
             var sb = new StringBuilder(hash.Length * 2);
             var fmt = lower ? "x2" : "X2";
             foreach (var b in hash) sb.Append(b.ToString(fmt));
